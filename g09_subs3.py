@@ -2005,3 +2005,58 @@ def read_fchk(fname):
     print('last lineno = {:d}'.format(lineno))
     return fchk
 ##
+def read_density_cube(fname, units='ang'):
+	# read Gaussian09 cube file of total density
+	# return a dict with the file contents
+	# see: http://gaussian.com/cubegen/
+	cube = {}
+	cube['vector'] = {'n':[], 'v':[]}
+	cube['atom'] = {'Z':[], 'q':[], 'x':[]}
+	rho = []
+	try:
+		fcub = open(fname, 'r')
+	except:
+		# could not open the cube file
+		print_err('open_fail', fname)
+	# read the cube file
+	iline = 0
+	for line in fcub:
+		fields = line.split()
+		if iline == 0:
+			# comment line
+			cube['comment'] = line.rstrip()
+		elif iline == 1:
+			# density description
+			cube['type'] = line.rstrip()
+		elif iline == 2:
+			# number of atoms; coordinate origin; number of dependent variables
+			cube['natoms'] = int(fields[0])
+			cube['origin'] = np.array(fields[1:4], dtype='float')
+			NVal = int(fields[4])
+			if NVal != 1:
+				print('*** this routine only handles a simple density cube')
+				print_err('', fname)
+		elif (iline == 3) or (iline == 4) or (iline == 5):
+			# an increment vector
+			# slowest-running increment is first
+			cube['vector']['n'].append(int(fields[0]))
+			cube['vector']['v'].append(np.array(fields[1:], dtype='float'))
+		elif iline < (cube['natoms'] + 6):
+			# atomic number; charge, position
+			cube['atom']['Z'].append(int(fields[0]))
+			cube['atom']['q'].append(float(fields[1]))
+			cube['atom']['x'].append(np.array(fields[2:], dtype='float'))
+		else:
+			# cube data
+			rho.extend(fields)
+		iline += 1	
+	fcub.close()
+	# cube file read successfully
+	cube['rho'] = np.array(rho, dtype='float').reshape(cube['vector']['n'])
+	if units == 'ang':
+		# convert distances from bohr to angstrom
+		cube['origin'] *= bohr
+		for i in range(3):
+			cube['vector']['v'][i] *= bohr
+	return cube
+##

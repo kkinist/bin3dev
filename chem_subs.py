@@ -2374,6 +2374,8 @@ def print_err(errtype, name='', halt=True):
         msg = '*** Unrecognized I/O code "{:s}"'.format(name)
     elif errtype == 'write_fail':
         msg = '*** Failure writing file "{:s}"'.format(name)
+    elif errtype == 'open_fail':
+        msg = '*** Failure opening file "{:s}"'.format(name)
     elif errtype == 'autodetect':
         msg = '*** Autodection failure'
         print(msg)
