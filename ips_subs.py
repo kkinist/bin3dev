@@ -5,9 +5,12 @@ import re, sys, copy, glob, os, pickle
 import numpy as np
 import pandas as pd
 import multiprocessing as mp
+import yaml
 from chem_subs import *
 from qm_subs import *
 from subprocess import call
+#
+KNOWN_CODES = ['gaussian09', 'quantum-espresso']
 ##
 class Walker(object):
     # includes history of energy, position, gradient
@@ -356,14 +359,14 @@ def step_specular(ips_input, walker, maxiter=20, trustR=0.5):
 def seed_points(ips_input, maxiter=20):
     # generate all needed seed points
     # return list of Walker objects
-    algorithm = ips_input['method'][0]
+    algorithm = ips_input['ips_method']['name']
     coordtype = ips_input['coordtype']
     if algorithm.upper() == 'SRIPS':
         # specular reflection algorithm
         nseed = 2
     elif algorithm.upper() == 'MRWIPS':
         # many repulsive walkers
-        nseed = ips_input['method'][1]  # one seed for each walker
+        nseed = ips_input['ips_method']['walkers']  # one seed for each walker
     else:
         sys.exit('Unrecognized algorithm in seed_points(): {:s}'.format(algorithm))
     print('Seeking {:d} seed points for algorithm {:s}'.format(nseed, algorithm.upper()))
@@ -416,6 +419,8 @@ def seed_points(ips_input, maxiter=20):
             Seed.append(sGeom.copy())
             gradient.append(sGrad.copy())
     # All seeds generated; now create Walkers
+    if ips_input['verbose']:
+        print('vv {:d} seed points generated'.format(len(Eseed)))
     walkers = [] # list of Walkers
     if algorithm == 'srips':
         # two seeds needed for one Walker
@@ -450,12 +455,12 @@ def find_ips_seed(ips_input, direction, maxiter=20, ID=0):
     #   the energy gradient (vector) in the same units, 
     #   and the iteration count
     coordtype = ips_input['coordtype']  # 'cartesian' or 'zmatrix'
-    frac = 1.0e-4 * ips_input['energy']  # guess for initial displacements
+    frac = 5.0e-4 * ips_input['energy']['value']  # guess for initial displacements
     # scale 'direction' to L2 length of 'frac' (units may be mixed radian/angstrom!)
     # this is assumed to be an uphill direction
     dvec = normalize(direction, length=frac)
     # Seek a geometry with the target energy with 'direction' as
-    #   the search direction (and initial length)
+    #   the search direction (and initial displacement)
     E, Scoord, grad, niter = seek_qm_energy_line(ips_input, dvec, maxiter=maxiter, ID=ID)
     # convert E from (hartree absolute) to (kJ/mol relative)
     Ekj = au_kjmol * (E - ips_input['E0'])
@@ -467,7 +472,7 @@ def seek_qm_energy_line(ips_input, dvec, maxiter=20, ID=0):
     has the target energy, within the specified tolerance. 
     Used only for generating seed points. """
     # use repeated energy/gradient calculations to find
-    #   a molecular structure that has the energy ips_input['energy'], 
+    #   a molecular structure that has the energy ips_input['energy']['value'], 
     #   with a tolerance of ips_input['tolerance']
     # The search is restricted to the line defined by 'dvec'
     #   'dvec' is assumed to be a reasonable step length and uphill
@@ -478,16 +483,16 @@ def seek_qm_energy_line(ips_input, dvec, maxiter=20, ID=0):
     #
     trustR = 0.5  # maximum permitted step length
     # convert from (kJ/mol relative) to (hartree absolute)
-    etarget = ips_input['E0'] + ips_input['energy'] / au_kjmol
-    etol = abs(ips_input['tolerance'] / au_kjmol)
-    lrange = etarget - etol
-    urange = etarget + etol
+    E0 = ips_input['E0']
+    etarget = E0 + convert_unit(ips_input['energy'], 'hartree')['value']
+    etol = convert_unit(ips_input['tolerance'], 'hartree')['value']
     coordtype = ips_input['coordtype']
     Geom = ips_input['E0_geom'].copy()
-    E0 = ips_input['E0']
+    if ips_input['verbose'] and ID == 0:
+        print('\tvv E0 = {:.5f}, Etarget = {:.5f} +/- {:.5f}'.format(E0, etarget, etol))
     unitX = Geom.unitX()  # initial units (tuple)
     # is the origin within the tolerance?
-    if (E0 > lrange) and (E0 < urange):
+    if in_bounds(E0, etarget, etol):
         # yes!  but have no gradient information
         print('>>>>  Origin point good (??) with E0 = {:f} and etarget = {:f} (etol = {:f})'.format(E0, etarget, etol))
         return E0, Geom, [], 0
@@ -497,6 +502,7 @@ def seek_qm_energy_line(ips_input, dvec, maxiter=20, ID=0):
     unitS = Geom.unitX()  # working units (tuple)
     # convert initial coordinate values to a vector
     X0 = Geom.toVector()
+    # 'S' is the step length along the search vector
     S = np.linalg.norm(dvec)  # initial step length
     dvec = normalize(dvec)   # now a unit vector
     # line search; keep track of upper/lower bounds
@@ -512,6 +518,11 @@ def seek_qm_energy_line(ips_input, dvec, maxiter=20, ID=0):
         S *= -1.  
         lowE = -np.inf
     # find the target energy
+    debug = True
+    if debug:
+        print('dddd  maxiter = {:d}'.format(maxiter))
+    Svec = []
+    Evec = []
     for itry in range(maxiter):
         # compute energy and gradient for current value of S
         # S is relative to the origin
@@ -519,29 +530,38 @@ def seek_qm_energy_line(ips_input, dvec, maxiter=20, ID=0):
         Geom.fromVector(X, unitS)
         ips_input[coordtype] = Geom
         E, grad, IDx = qm_function(ips_input, 'gradient', option='flatten', unitR=unitX[0], ID=ID)
-        if np.isnan(E):
+        if E is None:
             # calculation failed; quit
             break
+        Svec.append(S)
+        Evec.append(E)
         # are we done?
-        if (E > lrange) and (E < urange):
+        erel = (E - E0) * AU_KJMOL 
+        if in_bounds(E, etarget, etol):
             # yes!
+            if ips_input['verbose']:
+                print('\tvv iter={:d}, ID={}: seed point converged with Erel = {:.1f}'.format(itry+1, ID, erel))
             if 'degree' in unitX:
                 # convert angles back to degrees (but not in the gradient)
                 Geom.toUnits(unitX)
             return E, Geom, grad, itry+1  # show the user first iteration as no. 1
         # keep looking
-        erel = (E - E0) / au_kjmol
-        eratio = erel / ips_input['energy']  # relative E / target E
-        # keep track of bounds
+        # keep track of bounds 
         # too high or too low?
+        if ips_input['verbose']:
+            print('\tvv iter={:d}, ID={}:  S = {:.2f}, E = {:.5f}; erel = {:.1f}'.format(itry+1, ID, S, E, erel), end='')
         if E < etarget:
             # too low
+            if ips_input['verbose']:
+                print(' is too low')
             if E > lowE:
                 # a new lower bound
                 lowE = E
                 lowS = S
         else:
             # too high, E > etarget
+            if ips_input['verbose']:
+                print(' is too high')
             if E < highE:
                 # a new upper bound
                 highE = E
@@ -549,13 +569,28 @@ def seek_qm_energy_line(ips_input, dvec, maxiter=20, ID=0):
         #print(',,,,, itry = {:d} gives E = {:.4f} for S = {:.4f}\tlowE = {:.4f}, highE = {:.4f}'.format(itry, E, S, lowE, highE))
         # project 'grad' along 'dvec'
         gradS = np.dot(grad, dvec)  # component of gradient along the search direction
-        Sproj = (etarget - E) / gradS   # proposed displacement from current position
+        # 'Sproj' is proposed next step, based only upon the gradient
+        Sproj = (etarget - E) / gradS
         # don't exceed trust radius
         if abs(Sproj) > trustR:
-            #print(',,,, delta-S = {:.4f} is too large; scaling back to {:.2f}'.format(Sproj, trustR))
+            if ips_input['verbose']:
+                print('\tvv\tstep of {:.2f} exceeds trustR; scaling back'.format(Sproj))
             Sproj *= trustR / abs(Sproj)
-        # add this to the current value of S
-        S += Sproj  # proposed next value for S
+        deltaS = Sproj
+        try:
+            # 'Slinterp' is a linear interpolation between the high and low points
+            slope = (highE - lowE) / (highS - lowS)
+            intcpt = highE - slope * highS
+            Slinterp = (etarget - intcpt) / slope
+            # sometimes include the interpolated value, to damp oscillations
+            if np.random.random() > 0.6:
+                deltaS = (Sproj + Slinterp) / 2
+            if debug:
+                print('dddd Sproj = {:.3f}, Slinterp = {:.3f}, deltaS = {:.3f}'.format(Sproj, Slinterp, deltaS))
+        except:
+            # probably variables are not yet defined
+            pass
+        S += deltaS
         # don't exceed known limits
         # note that 'highS' may be smaller than 'lowS' (because name is based on energy)
         if abs(lowE * highE) != np.inf:
@@ -563,16 +598,34 @@ def seek_qm_energy_line(ips_input, dvec, maxiter=20, ID=0):
             (minS, maxS) = (min(lowS, highS), max(lowS, highS))
             # the target must be in the interval (minS, maxS) 
             if (S < minS) or (S > maxS):
-                # this is outside the known limits
+                # this is outside the known limits; use linear interpolation only
+                S = Slinterp
+                if ips_input['verbose']:
+                    print('\tvv out-of-bounds step replaced by linear interpolation')
+                    if debug:
+                        print('S({})\tE({})'.format(ID, ID))
+                        for i in range(len(Svec)):
+                            print('{:.3f}\t{:.5f}'.format(Svec[i], Evec[i]))
                 # choose 3/4 position between the bounds, in the direction of the gradient
-                print(';;;;;;;; gradient overshoots, S = {:f}, minS = {:f}, maxS = {:f}'.format(S, minS, maxS))
-                if S < minS:
-                    S = (3*lowS + highS) / 4
-                else:
-                    S = (lowS + 3*highS) / 4
+                #if S < minS:
+                #    S = (3*lowS + highS) / 4
+                #else:
+                #    S = (lowS + 3*highS) / 4
+                    slope = (highE - lowE) / (highS - lowS)
+                    intcpt = highE - slope * highS
+                    Slinterp = (etarget - intcpt) / slope
     #else:
     #    print_err('maxiter', maxiter, halt=False)
     # Arrive here only upon failure
+    if ips_input['verbose']:
+        if itry >= maxiter:
+            print('vv Iteration limit exceeded for ID={}'.format(ID))
+            if debug:
+                print('S\tE')
+                for i in range(len(Svec)):
+                    print('{:.3f}\t{:.5f}'.format(Svec[i], Evec[i]))
+        if E is None:
+            print('vv Gradient computation failed for ID={}'.format(ID))
     return np.nan, [], [], 0
 ##
 def seek_qm_energy(ips_input, ID=0, dX0=None, maxiter=20, trustR=0.5):
@@ -580,19 +633,20 @@ def seek_qm_energy(ips_input, ID=0, dX0=None, maxiter=20, trustR=0.5):
     the target energy, within the specified tolerance. 
     Only change coordinates that are active. """
     # use repeated energy/gradient calculations to find
-    #   a molecular structure that has the energy ips_input['energy'], 
+    #   a molecular structure that has the energy ips_input['energy']['value'], 
     #   with a tolerance of ips_input['tolerance']
     # dX0 (if any) is the step that was applied to create the input geometry
     # Return energy, coordinates, and gradient of an acceptable point
     #   also return number of iterations and ID
     # The coordinates and gradient are in the same distance units as the input structure
     # 'trustR' is maximum permitted step length
-    #
-    # convert from (kJ/mol relative) to (hartree absolute)
-    etarget = ips_input['E0'] + ips_input['energy'] / au_kjmol
-    etol = ips_input['tolerance'] / au_kjmol
-    algorithm = ips_input['method'][0]
-    #print(';;;;; etarget = {:.4f} and etol = {:.6} for walker {:d}'.format(etarget, etol, ID))
+
+    # convert to hartree
+    etarget = ips_input['E0'] + convert_unit(ips_input['energy'], 'hartree')['value']
+    etol = convert_unit(ips_input['tolerance'], 'hartree')['value']
+    algorithm = ips_input['ips_method']['name']
+    if ips_input['verbose']:
+        print('\tvv Etarget = {:5f} for walker {:d}'.format(etarget, ID))
     coordtype = ips_input['coordtype']
     Geom = ips_input[coordtype].copy()
     unitX = Geom.unitX()  # initial units (tuple)
@@ -608,13 +662,15 @@ def seek_qm_energy(ips_input, ID=0, dX0=None, maxiter=20, trustR=0.5):
         #ips_input[coordtype].print()
         qt = 1/0  # do this because of possible parallel jobs--avoid zombies
         sys.exit(1)
-    S = 1.  # step scaling factor
+    S = 1.  # step scaling factor (a scalar)
     grad = np.zeros_like(X)  # for initial point (no displacement)
-    
-    # find the target energy
+    # seek the target energy
     for itry in range(maxiter):
         # compute energy and gradient for current value of S
         # S is relative to the previous position
+        if itry % 3 == 2:
+            # reduce the step scaling factor every 3 iterations
+            S /= GOLD
         dX = S * grad
         X = X + dX
         Geom.fromVector(X, unitS)
@@ -624,26 +680,35 @@ def seek_qm_energy(ips_input, ID=0, dX0=None, maxiter=20, trustR=0.5):
         ips_input[coordtype] = Geom
         # call the quantum chemistry program
         E, grad, IDx = qm_function(ips_input, 'gradient', option='flatten', unitR=unitX[0], ID=ID)
-        if np.isnan(E):
+        if E is None:
             # gradient calculation failed.  Maybe because of atomic crowding
-            #print(';;;;; QM gradient failure for ID = {:d}, itry = {:d}: '.format(ID, itry), grad)
             if (itry == 0) and (algorithm == 'srips'):
                 # The first step; return failure
+                if ips_input['verbose']:
+                    print('\tvv failure in first step for walker {}'.format(ID))
                 return np.nan, 'failure in first step', 0, 0, ID
             else:
                 if itry == 0:
                     # first point failed; return to the previous successful point
                     X -= dX0
+                    if ips_input['verbose']:
+                        print('\tvv retreat to previous successful point for ID = {:d}, iter = {:d}: '.format(ID, itry+1))
                 else:
                     # try a smaller step
                     X -= dX  # retreat by the full step
                     S /= 2.   # smaller step
+                    if ips_input['verbose']:
+                        print('\tvv retry using a smaller step for ID = {:d}, iter = {:d}: '.format(ID, itry+1))
                 grad = np.zeros_like(X)  # replace grad = [] from failed QM calculation
                 continue
+        erel = (E - ips_input['E0']) * AU_KJMOL
+        eratio = erel / ips_input['energy']['value']  # relative E / target E
+        erratio = (erel - ips_input['energy']['value'])/ips_input['tolerance']['value']  # error / tolerance
         # are we done?
         if in_bounds(E, etarget, etol):
             # yes!
-            #print('\twalker {:d} converged to erratio = {:.1f} in {:d} iterations'.format(ID, (E-etarget)/etol, itry+1))
+            if ips_input['verbose']:
+                print('\tvv walker {:d} converged to Erel = {:.1f} in {:d} iterations'.format(ID, erel, itry+1))
             if 'degree' in unitX: 
                 # convert angles back to degrees (but not in the gradient)
                 Geom.toUnits(unitX)
@@ -651,41 +716,44 @@ def seek_qm_energy(ips_input, ID=0, dX0=None, maxiter=20, trustR=0.5):
                 Geom.canonical_angles()
             return E, Geom, grad, itry, ID
         # keep looking
-        erel = (E - ips_input['E0']) * au_kjmol
-        eratio = erel / ips_input['energy']  # relative E / target E
-        erratio = (erel - ips_input['energy'])/ips_input['tolerance']  # error / tolerance
-        #print(';;;;;;; itry = {:d} for ID = {:d} gives Erel = {:.1f}, E = {:.4f} (eratio = {:.1f}, erratio = {:.1f})'.format(itry, ID, erel, E, eratio, erratio))
-        # follow the gradient
+        if ips_input['verbose']:
+            print('\tvv itry = {:d} for ID = {:d} gives Erel = {:.1f} (eratio = {:.1f}, erratio = {:.1f})'.format(itry, ID, erel, eratio, erratio))
+        # return to top of loop unless special situations below
         if (eratio > 2) and (erratio > 10):
             # landed much too high (use double test in case of very low target energy)
             if algorithm in ['srips']:
                 if itry == 0:
                     # first step; return failure and message
+                    if ips_input['verbose']:
+                        print('\tvv eratio too high for walker {}'.format(ID))
                     return np.nan, 'eratio too high', 0, 0, ID
             elif algorithm in ['mrwips']:
                 X = X - dX0  # retreat toward the progenitor point
-                S /= 1.618
+                S /= GOLD
                 X = X + dX0 * S  # advance in the same direction but more timidly
                 grad = np.zeros_like(X)
-                print(';;;;;;; itry = {:d} for ID = {:d} gives Erel = {:.1f}, E = {:.4f} (eratio = {:.1f}, erratio = {:.1f})'.format(itry, ID, erel, E, eratio, erratio))
-                print(';;;\tretreat and S({:d}) = {:.3f} for ID = {:d}'.format(itry+1, S, ID))
+                if ips_input['verbose']:
+                    print('\tvv energy much too high; retreat to S({:d}) = {:.3f} for ID = {:d}'.format(itry+1, S, ID))
                 continue
         else:
             if 'active' in ips_input:
                 # remove components along inactive coordinates
                 grad = grad * ips_input['active_vec']
+            # Here is the normal stepping procedure
             gradl = np.linalg.norm(grad)  # length of gradient vector
             S = (etarget - E) / gradl  # positive to raise, negative to lower the energy
             grad = normalize(grad)
         # don't exceed trust radius
         if abs(S) > trustR:
-            print(';;;; S = {:.4f} is too large; scaling back to magnitude {:.2f}'.format(S, trustR))
+            if ips_input['verbose']:
+                print('\tvv S = {:.2f} exceeds trustR; scaling back to {:.2f}'.format(S, trustR))
             S *= trustR / abs(S)
-            
     else:
         # iteration limit reached
         if algorithm in ['mrwips']:
             # multi-walker method; only kill this walker
+            if ips_input['verbose']:
+                print('\tvv exceeded maxiter = {:d} for walker {}'.format(maxiter, ID))
             return np.nan, 'exceeded maxiter = {:d}'.format(maxiter), 0, 0, ID
         else:
             # fatal error
@@ -720,35 +788,38 @@ def qm_function(ips_input, task, verbose=False, option='', unitR='', ID='qm_func
     # did it succeed?
     success = qm_calculation_success(code, task, qmout[0])
     if not success:
-        with open('qm_err.log', 'a') as ferr, open(qmout[0], 'r') as badout:
-            ferr.write('QM failure for file {:s}'.format(qmout[0]))
-            for line in badout:
-                ferr.write(line)
-        #print(';;;;;;;; QM failure for file {:s}'.format(qmout[0]))
-    if (not success) and (task == 'minimize'):
-        # geometry optimization failed: try harder 
-        problem = qm_diagnose(code, task, qmout[0])
-        if verbose:
-            print('\tInitial geometry optimization failed: see {:s}'.format(qmout[0]))
-            print('\t--try again')
-        # regardless of the problem, just try again using the 
-        #   last (cartesian) coordinates in the failed optimization
-        #   This may change ZMatrix() to Geometry()
-        if ips_input['coordtype'] == 'zmatrix':
-            # change to Geometry()
-            ips_input['coordtype'] = 'cartesian'
-            ips_input['cartesian'] = ips_input['zmatrix'].toGeometry()
-        ips_input['cartesian'] = read_qm_Geometry(code, qmout[0])[-1]
-        mv_file_failed(qmout[0])  # rename the old output file
-        qminp = write_qm_input_ips(ips_input, task, ID, fileroot=fileroot)  #  'qminp' is name of QM input file
-        qmout = run_qm_job(code, qminp)
-        success = qm_calculation_success(code, task, qmout[0])
-    if not success:
-        # QM calculation failed
-        if verbose:
-            print('*** QM calculation failed at task "{:s}" ***'.format(task))
-        # return energy as NaN
-        return np.nan, [], ID
+        if task == 'minimize':
+            # geometry optimization failed: try harder 
+            problem = qm_diagnose(code, task, qmout[0])
+            if verbose:
+                print('\tInitial geometry optimization failed: see {:s}'.format(qmout[0]))
+            # regardless of the problem, just try again using the 
+            #   last (cartesian) coordinates in the failed optimization
+            #   This may change ZMatrix() to Geometry()
+            if ips_input['coordtype'] == 'zmatrix':
+                # change to Geometry()
+                ips_input['coordtype'] = 'cartesian'
+                ips_input['cartesian'] = ips_input['zmatrix'].toGeometry()
+            ips_input['cartesian'] = read_qm_Geometry(code, qmout[0])[-1]
+            E_last = read_qm_E_scf(code, qmout[0])[-1]
+            if verbose:
+                print('\t--trying again starting from E = {:.5f}'.format(E_last))
+            mv_file_failed(qmout[0])  # rename the old output file
+            qminp = write_qm_input_ips(ips_input, task, ID, fileroot=fileroot)  #  'qminp' is name of QM input file
+            qmout = run_qm_job(code, qminp)
+            success = qm_calculation_success(code, task, qmout[0])
+        else:
+            # non-minimization QM calculation failed; write error log and return failure
+            qmerrlog = 'qm_err.log'
+            with open(qmerrlog, 'a') as ferr, open(qmout[0], 'r') as badout:
+                ferr.write('QM failure for file {:s}'.format(qmout[0]))
+                for line in badout:
+                    ferr.write(line)
+            if verbose:
+                print('*** QM calculation failed at task "{:s}"'.format(task) +
+                    '; see file "{:s}"'.format(qmerrlog))
+            # return energy as None and name of output file instead of geometry
+            return None, qmout[0], ID
     # get the energy
     Elist = read_qm_energy(ips_input['code'], ips_input['theory'], qmout[0])
     if task == 'energy':
@@ -777,7 +848,7 @@ def qm_function(ips_input, task, verbose=False, option='', unitR='', ID='qm_func
             # choose only the last one
             gradCoord = gradCoord[-1]
             if unitR == 'angstrom':
-                gradCoord /= bohr  # change the units from bohr to angstrom
+                gradCoord /= BOHR  # change the units from bohr to angstrom
             if task == 'force':
                 # change the sign 
                 gradCoord *= -1
@@ -795,7 +866,7 @@ def qm_function(ips_input, task, verbose=False, option='', unitR='', ID='qm_func
                 # change the (inverse) distance units from bohr to angstrom
                 for zvar in gradCoord:
                     if ZMref.vtype[zvar] == 'distance':
-                        gradCoord[zvar] /= bohr
+                        gradCoord[zvar] /= BOHR
             if task == 'force':
                 # change the sign
                 for zvar in gradCoord:
@@ -807,6 +878,302 @@ def qm_function(ips_input, task, verbose=False, option='', unitR='', ID='qm_func
         else:
             print_err('coordtype', coordtype)
         return Elist[-1], gradCoord, ID
+##
+def read_yinput(user_input_file, default_config_file):
+    # read the user's YAML input file, *.yml
+    # also read the default configuration (i.e., input) file
+    # return a dict
+    with open(user_input_file) as fyaml:
+        inp_user = yaml.safe_load(fyaml)
+    molecule = filename_root(user_input_file)
+    inp_user['molecule'] = molecule
+    # read defaults
+    with open(default_config_file) as fdef:
+        inp_def = yaml.safe_load(fdef)
+    # recursively install anything present in the defaults
+    # that is missing from the user input
+    backfill_dict(inp_def, inp_user)
+    return inp_user
+##
+def parse_yinput(input_raw):
+    # convert units, simple input checking
+    #
+    # convert all top-level keywords to lowercase
+    parsed = dict( (k.lower(), v) for k,v in input_raw.items() )
+    known_ips = ['mrwips', 'srips']
+    # below, the lists of units and conversion factors must correspond
+    keyw_measure = {'energy'  : ['energy', 'tolerance', 'ramp'],
+                    'distance': ['stepl', 'stepl_atom', 
+                                 'max_stepl', 'random_kick',
+                                 'max_stepl_atom']}
+    known_units  = {'energy'  : ['kcal/mol', 'ev', 'hartree', 'kj/mol'],
+                    'distance': ['bohr', 'ang']}
+    pref_unit    = {'energy'  : 'kj/mol',
+                    'distance': 'angstrom'}
+    #unit_conver  = {'energy'  : [KCAL_KJ, EV_KJMOL, au_kjmol, 1.0],
+    #                'distance': [bohr, 1.0]}
+    # some theories do not have an explicit basis set
+    no_basis = ['am1', 'pm3', 'pm6']
+    # some keywords require integer values
+    keyw_int = ['ramp', 'steps', 'pixel', 'charge', 'ramp',
+                'random_kick', 'nprocs', 'save_freq', 'nstep']
+    parsed['coordtype'] = None
+    # check for both cartesian and z-matrix coordinate blocks
+    if ('cartesian' in parsed) and ('zmatrix' in parsed):
+        print_err('cartesian and zmatrix blocks are both present')
+    # check that max atomic step is larger than desired atomic step
+    try:
+        s = parsed['stepl_atom']['value']
+        smax = parsed['max_stepl_atom']['value']
+    except:
+        s = 0
+        smax = 1
+    if s > smax:
+        print_err('', 'max_stepl_atom ({}) must be '.format(smax) +
+            'larger than stepl_atom ({})'.format(s))
+    to_delete = []  # list of keywords to delete
+    # loop through the input dict
+    for key in parsed:
+        try:
+            field = parsed[key].copy()
+        except:
+            # not an object
+            field = parsed[key]
+        # known quantum code?
+        if key == 'code':
+            parsed[key] = parsed[key].lower()
+            if parsed[key] not in KNOWN_CODES:
+                print_err('unknown quantum code {:s}'.format(parsed[key]))
+        # known IPS algorithm?
+        if key == 'ips_method':
+            ips = parsed[key]['name'].lower()
+            if ips not in known_ips:
+                print_err('', 'unknown IPS algorithm: {:s}'.format(ips))
+            parsed[key]['name'] = ips
+        # the user must specify an energy target for IPS
+        if key == 'energy' and 'value' not in parsed[key]:
+            print_err('', 'energy target value must be specified')
+        if key == 'pbc':
+            # periodic boundary conditions 
+            if not parsed['pbc']['use_pbc']:
+                # remove the keyword
+                to_delete.append('pbc')
+        # unit checking and conversions
+        for quantity in keyw_measure:
+            # quantity = 'energy' or 'distance'
+            if key in keyw_measure[quantity]:
+                # expect a value and an appropriate unit
+                if ('value' not in parsed[key]) and ('how_much' not in parsed[key]):
+                    # it's just a unit with no value; flag it for deletion
+                    to_delete.append(key)
+                    break
+                field = convert_unit(field, pref_unit[quantity])
+                if False:
+                    uinp = field['unit'].lower()
+                    for iunit in range(len(known_units[quantity])):
+                        if known_units[quantity][iunit] in uinp:
+                            # convert value to preferred unit
+                            try:
+                                field['value'] *= unit_conver[quantity][iunit]
+                            except:
+                                # 'how_much' instead of 'value'
+                                field['how_much'] *= unit_conver[quantity][iunit]
+                            field['unit'] = pref_unit[quantity]
+                            break
+                    else:
+                        # unknown unit 
+                        print_err('units', '{:s} for {:s}'.format(uinp, key))
+        if key == 'spinmult':
+            # convert from string (chosen for clarity) and integer (2S+1)
+            field = spinname(field)
+        if key in keyw_int:
+            # require some parameter to be an integer
+            try:
+                if type(field['how_often']) is not int:
+                    print_err('need_int', key)
+            except:
+                # simple scalar, or no 'howmuch' value
+                if type(field) is not int:
+                    print_err('need_int', key)
+        if key == 'normal_mode':
+            # replace range strings by list of int
+            modes = []  # list to grow
+            for word in field:
+                # convert to int; possible hyphenated range
+                modes.extend(range_to_list(word))
+            field = modes.copy()
+        if key == 'cartesian':
+            # Cartesian coordinates
+            parsed['coordtype'] = 'cartesian'
+            # convert to a Geometry object
+            crd = [line.split() for line in parsed['cartesian'].splitlines()]
+            field = Geometry(crd, intype='1list', units=parsed['coord_unit'])
+            # ensure coordinates unit is angstrom
+            field.toAngstrom()
+        if key == 'zmatrix':
+            # molecule specified using Z-matrix
+            parsed['coordtype'] = 'zmatrix'
+            # convert to a ZMatrix object
+            # first strip any leading atom numbers
+            regI = re.compile(r'^\s*\d+\s*')  # check for leading atom index
+            zmt = parsed['zmatrix'].splitlines()
+            for i in range(len(zmt)):
+                zmt[i] = regI.sub('', zmt[i])
+            # input angles are assumed to be in degrees
+            field = parse_ZMatrix(zmt)
+            # check zmatrix for missing variable values
+            if field.checkVals(verbose=True):
+                sys.exit('You need to fix the Z-matrix.')
+            # ensure distances are in angstrom
+            field.toAngstrom()
+        if key == 'constraint':
+            field = parse_constraint_input(field)
+        # replace the original keyword values
+        parsed[key] = field
+    # done with loop over keys
+    #
+    # delete useless keys
+    dict_delkey(parsed, to_delete)
+    if (parsed['code'] in ['quantum-espresso']) and \
+        ('pbc' not in parsed):
+        print_err('', 'code ' + parsed['code'] + 
+            ' requires periodic boundary conditions (pbc)')
+    # in the returned dict, 'code_options', 'theory', and 'basis'
+    # should refer only to the selected quantum code
+    options_default = parsed['code_options'][parsed['code']]
+    line_options = ['theory', 'basis']
+    for key in options_default:
+        # specify 'theory' and 'basis' if user did not
+        if key in line_options:
+            if key not in parsed:
+                parsed[key] = options_default[key]
+        elif key not in parsed['code_options']:
+            # user did not specify this code-specific option
+            parsed['code_options'][key] = options_default[key]
+    cleanup_code_options(parsed['code'], parsed['code_options'])
+    # give ALL atoms unit mass; this is IPS, not dynamics
+    install_unit_masses(parsed[parsed['coordtype']])
+    #
+    if ('zmatrix' in parsed) and ('active' in parsed):
+        # list of always-active z-matrix variables (usually free torsions)
+        #   expand any wildcards
+        # also boolean vector (for variables in alphabetical order)
+        parsed['active'], parsed['active_vec'] = \
+            parse_active_coords(parsed['active'], parsed['zmatrix'])
+    #
+    if ('dflood' in parsed) and (parsed['coordtype'] != 'zmatrix'):
+        print_err('', 'dimensional flooding requires a symbolic Z-matrix')
+    if 'ips_method' not in parsed:
+        print_err('', 'no IPS algorithm \("ips_method"\) was specified')
+    # process step length information
+    if 'stepl' in parsed:
+        # don't need the lower-priority 'stepl_atom' parameter
+        dict_delkey(parsed, 'stepl_atom')
+    ips_opts = parsed['ips_method']
+    apply_steplatom = False
+    if ips_opts['name'] == 'mrwips':
+        # MRWIPS algorithm
+        # resolve multiple specifications of step length
+        # priority:  stepl > step_angle > stepl_atom
+        if 'stepl' not in parsed:
+            if 'step_angle' not in ips_opts:
+                if 'stepl_atom' in parsed:
+                    # use stepl_atom value and units
+                    apply_steplatom = True
+                else:
+                    print_err('', 'step length must be specified in some way')
+            else:
+                # will apply step_angle after the seed points are available
+                #   to define the radius from the origin
+                if ips_opts['step_angle'] > np.pi/2:
+                    # user meant degrees?
+                    print_err('', 'step angle of {:.2f} radian is unreasonably large')
+                # don't need the lower-priority 'stepl_atom' key
+                dict_delkey(parsed, 'stepl_atom')
+        else:
+            # won't need the lower-priority step-angle specifications
+            dict_delkey(ips_opts, 'step_angle')
+        if 'walkers' not in ips_opts:
+            print_err('', 'number of walkers must be specified for MRWIPS')
+    elif ips_opts['name'] == 'srips':
+        # SRIPS algorithm
+        # priority: stepl > stepl_atom
+        if 'stepl' not in parsed:
+            if 'stepl_atom' in parsed:
+                # use stepl_atom
+                apply_steplatom = True
+            else:
+                print_err('', 'step length must be specified in some way')
+    if apply_steplatom:
+        # compute 'stepl' value
+        print('---- apply stepl_atom')
+        parsed['stepl'] = {
+            'value': parsed['stepl_atom']['value'] * \
+                     parsed[parsed['coordtype']].natom(),
+            'unit' : parsed['stepl_atom']['unit'] }
+    # check that max steps are larger than desired steps
+    try:
+        s = parsed['stepl']['value']
+        smax = parsed['max_stepl']['value']
+    except:
+        s = 0
+        smax = 1
+    if s > smax:
+        print_err('', 'max_stepl ({}) must be larger than stepl ()'.format(smax,s))
+    # remove the unneeded code_options from the default config file
+    n = dict_delkey(parsed['code_options'], KNOWN_CODES)
+    # if restarting, remove the 'silent_delete' key (in default config file)
+    if parsed['continuation']:
+        dict_delkey(parsed, 'silent_delete')
+    # delete 'basis' key if not needed
+    if parsed['theory'] in no_basis:
+        dict_delkey(parsed, 'basis')
+    return parsed
+##
+def cleanup_code_options(code, code_options):
+    # given the dict parsed['code_options'], make it refer only to the specified code
+    # return the modified dict
+    to_delete = []
+    if code == 'gaussian09':
+        if 'nstep' in code_options:
+            # rename this 'maxcyc'
+            if 'maxcyc' not in code_options:
+                code_options['maxcyc'] = code_options['nstep']
+                to_delete.append('nstep')
+    elif code == 'quantum-espresso':
+        block_opts = {
+            'control'  : ['calculation', 'restart_mode', 'nstep',
+                'outdir', 'pseudo_dir', 'tprnfor'],
+            'system'   : ['ecutwfc', 'ecutrho', 'occupations', 'degauss',
+                'ntyp', 'nat'],
+            'electrons': ['conv_thr', 'mixing_beta'],
+            'ions'     : ['']}
+        block_names = list(block_opts.keys())
+        # move unassigned code_options inside the appropriate block
+        # user may not specify 'title' or 'prefix'
+        dict_delkey(code_options, ['title', 'prefix'])
+        for block in block_opts:
+            # create a separate list for each block
+            if block not in code_options:
+                code_options[block] = {}
+        if 'maxcyc' in code_options:
+            # rename this 'nstep'
+            if 'nstep' not in code_options:
+                code_options['nstep'] = code_options['maxcyc']
+                to_delete.append('maxcyc')
+        allowed_cmd = [x for y in block_opts for x in block_opts[y]]
+        allowed_cmd += ['k_points']
+        for opt in code_options:
+            if opt not in (allowed_cmd + block_names + KNOWN_CODES):
+                print_err('', 'unknown code option {}'.format(opt))
+            for block in block_opts:
+                if opt in block_opts[block]:
+                    code_options[block][opt] = code_options[opt]
+                    to_delete.append(opt)
+    else:
+        print_err('code', code)
+    dict_delkey(code_options, to_delete)
+    return
 ##
 def read_input(input_file):
     # read the user's input file, *.ips
@@ -1033,11 +1400,11 @@ def parse_input(input_raw):
         parsed['bondtol'] = 1.3
     if parsed['method'][0] in ['mrwips']:
         # resolve multiple specifications of step length
-        # priority:  stepl > step_angle > step_atom
+        # priority:  stepl > step_angle > stepl_atom
         if not ('stepl' in parsed):
             if not ('step_angle' in parsed):
                 if 'stepl_atom' in parsed:
-                    # use step_atom
+                    # use stepl_atom
                     parsed['stepl'] = parsed['stepl_atom'] * parsed[parsed['coordtype']].natom()
                 else:
                     print('*** Using default initial stepl = 0.1')
@@ -1047,29 +1414,16 @@ def parse_input(input_raw):
                 pass
     else:
         # SRIPS algorithm
-        # priority: stepl > step_atom
+        # priority: stepl > stepl_atom
         if not ('stepl' in parsed):
             if 'stepl_atom' in parsed:
-                # use step_atom
+                # use stepl_atom
                 parsed['stepl'] = parsed['stepl_atom'] * parsed[parsed['coordtype']].natom()
             else:
                 print('*** Using default initial stepl = 0.1')
                 parsed['stepl'] = 0.1           
     #
     return parsed
-##
-def print_dict(ips_input, tablevel=0):
-    # Print dictionary (e.g., my interpretation of the input file) alphabetically
-    for k in sorted(ips_input.keys()):
-        print('\t'*tablevel + '{:s}:'.format(k))
-        v = ips_input[k]
-        # recurse if 'v' is also a dict
-        try:
-            print_dict(v, tablevel+1)
-        except:
-            # just print 'v'
-            print('\t'*(tablevel+1), v)
-    return
 ##
 def parse_active_coords(crdlist, ZM):
     # parse any wildcard characters to return a fully explicit
@@ -1169,83 +1523,222 @@ def range_to_list(hyphenated_range):
         print('*** Unrecognized integer range in range_to_list():', hyphenated_range)
     return retval
 ##
-def format_qm_input_ips(ips_input):
-    # prepare to write an input file for the specified quantum-chemistry code
-    #    based upon the ips_input
-    code = ips_input['code']
+def format_g09_input_ips(ips_input):
+    # prepare to write an input file for Gaussian09
+    #    based upon 'ips_input'
+    #
+    # '%' commands go in the header
+    cmd_header = ['chk', 'mem', 'nprocs']
+    # some are specified with the 'scf' keyword
+    cmd_scf = ['xqc']
+    # some are specified with the 'geom' keyword
+    cmd_geom = ['nocrowd']
+    #
     coordtype = ips_input['coordtype']
     contents = ips_input.copy()
-    if code == 'gaussian09':
-        # prepare the header
-        hdr = {}
-        for opt in ips_input['code_options']:
-            if ips_input['code_options'][opt][0] == 'header':
-                hdr[opt] = ips_input['code_options'][opt][1]
-        if len(hdr) > 0:
-            contents['header'] = hdr
-        # prepare the command string
-        cmd = '# ' + ips_input['theory']
-        if 'basis' in ips_input:
-            cmd += '/' + ips_input['basis']
-        for opt in ips_input['code_options']:
-            if ips_input['code_options'][opt][0] == 'command':
-                arg = ips_input['code_options'][opt][1]
-                if len(arg) > 0:
-                    cmd += ' ' + opt + '=' + arg
-                else:
-                    cmd += ' ' + opt
-        contents['command'] = cmd
-    else:
-        # unhandled choice of QM code
-        print_err('code', code)
-    # prepare the coordinates (Cartesian); replaced object
-    coordstr = format_qm_coordinates(code, ips_input[coordtype])
+    # prepare the header and the command line
+    hdr = {}
+    scf_cmd = []
+    geom_cmd = []
+    cmd = '# ' + ips_input['theory']
+    if 'basis' in ips_input:
+        cmd += '/' + ips_input['basis']
+    code_options = ips_input['code_options']
+    for opt in cmd_header:
+        if opt in code_options:
+            hdr[opt] = code_options[opt]
+    for opt in cmd_scf:
+        if opt in code_options:
+            scf_cmd.append(opt)
+    for opt in cmd_geom:
+        if opt in code_options:
+            geom_cmd.append(opt)
+    if len(scf_cmd) > 0:
+        cmd += ' scf=(' + ','.join(scf_cmd) + ')'
+    if len(geom_cmd) > 0:
+        cmd += ' geom=(' + ','.join(geom_cmd) + ')'
+    if 'command' in code_options:
+        # add this string to the command line without change
+        cmd += ' ' + ' '.join(code_options['command'])
+    contents['command'] = cmd
+    if len(hdr) > 0:
+        contents['header'] = hdr
+    # prepare the coordinates (Cartesian); replace object
+    coordstr = format_qm_coordinates('gaussian09', ips_input[coordtype])
     contents['coordinates'] = coordstr
-    if not 'comment' in contents:
-        # supply a comment
-        contents['comment'] = 'IPS calculation for {:s}'.format(ips_input['molecule'])
-    # add suffix to filename
+    # descriptive comment
+    contents['comment'] = 'IPS calculation for {:s}'.format(ips_input['molecule'])
     return contents
 ##
 def write_qm_input_ips(ips_input, task='', ID=0, fileroot=''):
-    # prepare to write an input file for the specified quantum-chemistry code
-    #    based upon the ips_input
+    # just call the routine tailored to the quantum code
+    code = ips_input['code']
+    if code == 'gaussian09':
+        fname = write_g09_input_ips(ips_input, task=task,
+                ID=ID, fileroot=fileroot)
+    elif code == 'quantum-espresso':
+        fname = write_qe_input_ips(ips_input, task=task,
+                ID=ID, fileroot=fileroot)
+    else:
+        print_err('code', code)
+    return fname
+##
+def format_qe_input_ips(ips_input, task):
+    # prepare to write an input file for Quantum Espresso
+    #    based upon 'ips_input'
+    # this can modify ips_input
+    amp_cmd = {
+        'control'  : ['calculation', 'restart_mode', 'nstep',
+            'outdir', 'pseudo_dir', 'tprnfor'],
+        'system'   : ['ecutwfc', 'ecutrho', 'occupations', 'degauss',
+            'ntyp', 'nat'],
+        'electrons': ['conv_thr', 'mixing_beta'],
+        'ions'     : ['']}
+    allowed_cmd = [x for y in amp_cmd for x in amp_cmd[y]]
+    allowed_cmd += ['k_points']
+    # require that blocks appear in a specific order
+    block_names = ['control', 'system', 'electrons', 'ions']
+    code_options = ips_input['code_options']
+    if task == 'gradient':
+        # remove the IONS section
+        del amp_cmd['ions']
+        block_names.remove('ions')
+    if False:
+        # move unassigned 'code_options' inside the appropriate section
+        # user may not specify 'title' or 'prefix'
+        dict_delkey(code_options, ['title', 'prefix'])
+        for block in block_names:
+            # create a separate lists for each &section
+            if block not in code_options:
+                code_options[block] = {}
+        to_delete = []
+        for opt in code_options:
+            if opt not in (allowed_cmd + block_names):
+                print_err('', 'unknown code option {}'.format(opt))
+            for block in block_names:
+                if opt in amp_cmd[block]:
+                    code_options[block][opt] = code_options[opt]
+                    to_delete.append(opt)
+        dict_delkey(code_options, to_delete)
+    # get PBC parameters
+    pbc_opts = ips_input['pbc']
+    if 'ang' in pbc_opts['edge']['unit']:
+        # QE requires celldm in bohr; convert
+        pbc_opts['edge']['value'] /= BOHR
+        pbc_opts['edge']['unit'] = 'bohr'
+    code_options['system']['celldm(1)'] = pbc_opts['edge']['value']
+    # compute 'ntyp' (no. of atom types) and 'natom' (no. of atoms)
+    coordtype = ips_input['coordtype']
+    stoich = ips_input[coordtype].stoichiometry(as_dict=True)
+    code_options['system']['ntyp'] = len(stoich)
+    code_options['system']['nat'] = ips_input[coordtype].natom()
+    contents = ips_input.copy()
+    # YAML does not handle scientific notation adequately
+    regex_sci = re.compile(r'[-]?\d*\.\d+[DdEe][-+]?\d+')
+    # sections starting with &<BLOCK NAME>
+    amp_str = ''  
+    for block in block_names:
+        amp_str += ' &{:s}\n'.format(block.upper())
+        blk = code_options[block]
+        for opt in blk:
+            # formatting depends upon type of value
+            if type(blk[opt]) is str:
+                if regex_sci.match(blk[opt]):
+                    # scientific notation, not string
+                    s = '{:s} ,'.format(blk[opt])
+                else:
+                    # add single quotes around string 
+                    s = "'{:s}' ,".format(blk[opt])
+            elif type(blk[opt]) is bool:
+                # fortran-style .true. or .false.
+                s = '.{:s}. ,'.format(str(blk[opt]).lower())
+            else:
+                # probably numeric
+                s = '{} ,'.format(blk[opt])
+            amp_str += '    {:s} = {:s}\n'.format(opt, s)
+        # add closing line
+        amp_str += ' /\n'
+    # remaining sections, without & prefix
+    no_amp = 'ATOMIC_SPECIES\n'
+    # chemical elements, with mass and pseudopotential
+    for e in stoich:
+        e = e.upper()
+        s = '   {:s}  {:8.4f}  {:s}.{:s}\n'.format(e, 
+            atomic_weight(e), e, ips_input['basis'])
+        no_amp += s
+    # atomic coordinates
+    no_amp += 'ATOMIC_POSITIONS {:s}\n'.format(ips_input['coord_unit'])
+    coordstr = format_qm_coordinates('quantum-espresso', ips_input[coordtype])
+    no_amp += coordstr
+    # k points
+    no_amp += 'K_POINTS {:s}\n'.format(code_options['k_points'])
+    contents['amp'] = amp_str
+    contents['noamp'] = no_amp
+    return contents
+##
+def write_qe_input_ips(ips_input, task='', ID=0, fileroot=''):
+    # write an input file for Quantum Espresso based upon the ips_input
     # 'task' may indicate one additional action:
-    #   'minimize', 'gradient'
+    #   'minimize', 'gradient', 'freq'
     # 'ID' is an identifier (any dtype) to avoid filename collisions in parallel jobs
     #   it's only used if 'fileroot' is blank
     # 'fileroot' will be used to construct the filenames unless blank
-    code = ips_input['code']
-    contents = format_qm_input_ips(ips_input)
-    # check for some possible problems
-    if code == 'gaussian09':
-        # see if 'guess=check' is requested but the checkpoint file 
-        #   does not yet exist 
-        if 'header' in contents:
-            for key in contents['header']:
-                if key == 'chk':
-                    chkfile = contents['header'][key]
-                    # does it exist?
-                    if not os.path.isfile(chkfile):
-                        # No. Remove any 'guess=check' command
-                        m = re.search(r'\s(guess=check)', contents['command'], re.IGNORECASE)
-                        if m:
-                            print('*** Suppressing "guess=check" because checkpoint file {:s} does not exist.'.format(chkfile))
-                            contents['command'] = re.sub(m.group(1), '', contents['command'])
+    #
+    code = 'quantum-espresso'
+    # act upon 'task'
+    if task == 'minimize':
+        ips_input['code_options']['control']['calculation'] = 'relax'
+    if task == 'gradient':
+        # this is the default configuration
+        ips_input['code_options']['control']['tprnfor'] = True
+        ips_input['code_options']['control']['calculation'] = 'scf'
+    if task == 'freq':
+        # this is not yet implemented: requires ph.x instead of pw.x
+        print_err('undone', 'phonon calculation using {:s}'.format(code))
+    # create a filename and 'prefix'
+    if len(fileroot) == 0:
+        # create a filename
+        froot = '{:s}_{:s}'.format(ips_input['molecule'], str(ID))  # root of quantum chemistry input filename
     else:
-        print_err('code', code)
+        # use the supplied name
+        froot = fileroot
+    ips_input['code_options']['control']['prefix'] = froot
+    ips_input['code_options']['control']['title'] = \
+        'IPS calculation for {:s}'.format(ips_input['molecule'])
+    filename = supply_qm_filename_suffix(code, froot, 'input')
+    # prepare the contents of the QE input file
+    contents = format_qe_input_ips(ips_input, task)
+    write_qm_input(filename, code, contents)
+    return filename
+##
+def write_g09_input_ips(ips_input, task='', ID=0, fileroot=''):
+    # write an input file for Gaussian09 based upon the ips_input
+    # 'task' may indicate one additional action:
+    #   'minimize', 'gradient', 'freq'
+    # 'ID' is an identifier (any dtype) to avoid filename collisions in parallel jobs
+    #   it's only used if 'fileroot' is blank
+    # 'fileroot' will be used to construct the filenames unless blank
+    contents = format_g09_input_ips(ips_input)
+    code = 'gaussian09'
+    # check for some possible problems
+    # see if 'guess=check' is requested but the checkpoint file 
+    #   does not yet exist 
+    if 'header' in contents:
+        for key in contents['header']:
+            if key == 'chk':
+                chkfile = contents['header'][key]
+                # does it exist?
+                if not os.path.isfile(chkfile):
+                    # No. Remove any 'guess=check' command
+                    m = re.search(r'\s(guess=check)', contents['command'], re.IGNORECASE)
+                    if m:
+                        print('*** Suppressing "guess=check" because checkpoint file {:s} does not exist.'.format(chkfile))
+                        contents['command'] = re.sub(m.group(1), '', contents['command'])
     # add any additional action to the command
-    if task in ['minimize', 'gradient', 'freq']:
-        if code == 'gaussian09':
-            if task == 'minimize':
-                # energy-minimization
-                contents['command'] += ' opt'
-            elif task == 'gradient':
-                # energy gradient
-                contents['command'] += ' force'
-            elif task == 'freq':
-                # harmonic vibrational frequencies
-                contents['command'] += ' freq'
+    action = {'minimize': ' opt', 'gradient': ' force',
+        'freq': ' freq'}
+    if task in action:
+        contents['command'] += action[task]
     if len(fileroot) == 0:
         # create a filename
         froot = '{:s}_{:s}'.format(ips_input['molecule'], str(ID))  # root of quantum chemistry input filename
@@ -1270,11 +1763,11 @@ def confirm_newstart(ips_input):
     if nfiles == 0:
         # nothing to do
         return
-    if not ips_input['continuation']:
+    if (not ips_input['continuation']) and (not ips_input['silent_delete']):
         # prompt user
         print('Do you really want to delete all {:d} earlier files for "{:s}"? '.format(nfiles, molec), end='')
         u = input().lower()
-        if re.match('y', u):
+        if 'y' in u:
             # delete the files
             for file in files:
                 #print('\t{:s} '.format(file))
@@ -1366,10 +1859,10 @@ def energy_ramp(iteration, ips_input):
     if not ('ramp' in ips_input):
         # no ramp was requested; do nothing
         return
-    if (iteration > 0) and not (iteration % ips_input['ramp'][0]):
+    if (iteration > 0) and not (iteration % ips_input['ramp']['how_often']):
         # yes, change the target energy
-        ips_input['energy'] = ips_input['energy'] + ips_input['ramp'][1]
-        print('Target energy ramped to {:.1f} kJ/mol relative.'.format(ips_input['energy']))
+        ips_input['energy']['value'] += ips_input['ramp']['how_much']
+        print('Target energy ramped to {:.1f} kJ/mol relative.'.format(ips_input['energy']['value']))
     return
 ##
 def dflood_activate(gradient, ips_input, ID=None):

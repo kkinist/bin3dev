@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 from scipy.spatial.distance import cdist
 #
+# don't use the lower-case constants anymore
 amu_au = 1 / 5.4857990946E-4    # amu expressed in a.u. (viz., electron masses)
 amu_kg = 1.660539040e-27        # amu (aka u) expressed in kg
 au_wavenumber = 219474.6313708  # hartree expressed in wavenumbers
@@ -21,8 +22,213 @@ Rgas = avogadro * boltzmann # in J / mol.K
 eV_per_hartree = 27.21138602  # from NIST website 10/25/2016
 au_kjmol = au_joule * avogadro / 1000   # hartree expressed in kJ/mol
 ev_wavenumber = au_wavenumber / eV_per_hartree      # eV expressed in cm**-1
+#
+AVOGADRO = 6.02214129e23 # Avogadro constant
+PLANCK = 6.62606957e-34  # Planck constant (h) in J.s
+CLIGHT = 299792458.     # speed of light (c)in m/s
+BOLTZMANN = 1.38064852e-23  # Boltzmann constant (k) in J/K
+RGAS = AVOGADRO * BOLTZMANN # in J / mol.K
 GOLD = (1 + np.sqrt(5))/2  # golden ratio
 #
+AMU_AU = 1 / 5.4857990946E-4    # amu expressed in a.u. (viz., electron masses)
+AMU_KG = 1.660539040e-27        # amu (aka u) expressed in kg
+AU_WAVENUMBER = 219474.6313708  # hartree expressed in wavenumbers
+AU_JOULE = 4.35974434E-18       # hartree expressed in joule
+EV_PER_HARTREE = 27.21138602  # from NIST website 10/25/2016
+AU_KJMOL = AU_JOULE * AVOGADRO / 1000   # hartree expressed in kJ/mol
+EV_WAVENUMBER = AU_WAVENUMBER / EV_PER_HARTREE      # eV expressed in cm**-1
+KJMOL_WAVENUMBER = AU_WAVENUMBER / AU_KJMOL  # kJ/mol expressed in cm**-1
+BOHR = 0.5291772109     # Bohr radius (a0) in angstrom
+KCAL_KJ = 4.184  # kcal expressed in kJ
+EV_KJMOL = AU_KJMOL / EV_PER_HARTREE  # eV expressed in kJ/mol
+#
+def convert_unit(quantity, target_unit):
+    # unit conversion; 'quantity' is a dict with 'value' (or 'how_much') and 'unit'
+    # 'target_unit' is a string in one of the lists below
+    # return value: another dict with the new units
+    #
+    try:
+        v1 = quantity['value']
+        vkey = 'value'
+    except KeyError:
+        v1 = quantity['how_much']
+        vkey = 'how_much'
+    except:
+        print_err('', 'unable to convert units for quantity: ' + str(quantity))
+    u1 = quantity['unit'].lower()
+    u2 = target_unit.lower()
+    qconv = quantity.copy()
+    if u1 == u2:
+        # no conversion needed
+        return qconv
+    #
+    # the order of the unit names and the regex's must be consistent
+    regxE = [re.compile(s) for s in \
+             ['har',     'ev', 'kj',     'cm',   'kcal']]
+    energy = ['hartree', 'ev', 'kj/mol', 'cm-1', 'kcal/mol']
+    regxD = [re.compile(s) for s in ['ang',      'bohr']]
+    distance =                      ['angstrom', 'bohr']
+    # 'me' unit is electron mass (atomic unit of mass)
+    regxM = [re.compile(s) for s in ['u',   'kg', 'me']]
+    mass =                          ['amu', 'kg', 'me']
+    # special treatment for mass unit 'amu'/'u'
+    regxM[0] = re.compile(r'u\b')
+    # construct boolean arrays of unit matching
+    # need 'search' method for mass because of 'u'/'amu'
+    bu1E = np.array([bool(regx.match(u1)) for regx in regxE])
+    bu1D = np.array([bool(regx.match(u1)) for regx in regxD])
+    bu1M = np.array([bool(regx.search(u1)) for regx in regxM])
+    bu2E = np.array([bool(regx.match(u2)) for regx in regxE])
+    bu2D = np.array([bool(regx.match(u2)) for regx in regxD])
+    bu2M = np.array([bool(regx.search(u2)) for regx in regxM])
+    # construct boolean lists of quantity type
+    b1 = np.array([b.any() for b in [bu1E, bu1D, bu1M]])
+    b2 = np.array([b.any() for b in [bu2E, bu2D, bu2M]])
+    if (b1.any() and b2.any()) and \
+        (np.argwhere(b1)[0][0] == np.argwhere(b2)[0][0]):
+        # units are known and are compatible
+        itype = np.argwhere(b1)[0][0]
+    else:
+        # units are problematic
+        print_err('', 'Unable to convert ' +
+            '{} to {}'.format(quantity['unit'], target_unit))
+    # do the conversion
+    if itype == 0:
+        # energy units
+        i1 = np.argwhere(bu1E)[0][0]
+        i2 = np.argwhere(bu2E)[0][0]
+        # change 'u1' and 'u2' to the full unit names
+        u1 = energy[i1]
+        u2 = energy[i2]
+        if i1 == i2:
+            # no conversion needed, but rename the unit
+            qconv['unit'] = u2
+            return qconv
+        if u2 == 'hartree':
+            # converting to hartree
+            if u1 == 'ev':
+                v2 = v1 / EV_PER_HARTREE
+            elif u1 == 'kj/mol':
+                v2 = v1 / AU_KJMOL
+            elif u1 == 'cm-1':
+                v2 = v1 / AU_WAVENUMBER
+            elif u1 == 'kcal/mol':
+                v2 = v1 * KCAL_KJ / AU_KJMOL
+            else:
+                # should never get here
+                v2 = None
+        elif u2 == 'ev':
+            if u1 == 'hartree':
+                v2 = v1 * EV_PER_HARTREE
+            elif u1 == 'kj/mol':
+                v2 = v1 / EV_KJMOL
+            elif u1 == 'cm-1':
+                v2 = v1 / EV_WAVENUMBER
+            elif u1 == 'kcal/mol':
+                v2 = v1 * KCAL_KJ / EV_KJMOL
+            else:
+                v2 = None
+        elif u2 == 'kj/mol':
+            if u1 == 'hartree':
+                v2 = v1 * AU_KJMOL
+            elif u1 == 'ev':
+                v2 = v1 * EV_KJMOL
+            elif u1 == 'cm-1':
+                v2 = v1 / KJMOL_WAVENUMBER
+            elif u1 == 'kcal/mol':
+                v2 = v1 * KCAL_KJ
+            else:
+                v2 = None
+        elif u2 == 'cm-1':
+            if u1 == 'hartree':
+                v2 = v1 * AU_WAVENUMBER
+            elif u1 == 'ev':
+                v2 = v1 * EV_WAVENUMBER
+            elif u1 == 'kj/mol':
+                v2 = v1 * KJMOL_WAVENUMBER
+            elif u1 == 'kcal/mol':
+                v2 = v1 * KCAL_KJ * KJMOL_WAVENUMBER
+            else:
+                v2 = None
+        elif u2 == 'kcal/mol':
+            if u1 == 'hartree':
+                v2 = v1 * AU_KJMOL / KCAL_KJ
+            elif u1 == 'ev':
+                v2 = v1 * EV_KJMOL / KCAL_KJ
+            elif u1 == 'kj/mol':
+                v2 = v1 / KCAL_KJ
+            elif u1 == 'cm-1':
+                v2 = v1 / KJMOL_WAVENUMBER / KCAL_KJ
+            else:
+                v2 = None
+        else:
+            # should never get here
+            v2 = None
+    elif itype == 1:
+        # distance units
+        i1 = np.argwhere(bu1D)[0][0]
+        i2 = np.argwhere(bu2D)[0][0]
+        u1 = distance[i1]
+        u2 = distance[i2]
+        if i1 == i2:
+            # no conversion needed, but rename the unit
+            qconv['unit'] = u2
+            return qconv
+        if u2 == 'angstrom':
+            if u1 == 'bohr':
+                v2 = v1 * BOHR
+            else:
+                v2 = None
+        elif u2 == 'bohr':
+            if u1 == 'angstrom':
+                v2 = v1 / BOHR
+            else:
+                v2 = None
+        else:
+            v2 = None
+    elif itype == 2:
+        # mass units
+        i1 = np.argwhere(bu1M)[0][0]
+        i2 = np.argwhere(bu2M)[0][0]
+        u1 = mass[i1]
+        u2 = mass[i2]
+        if i1 == i2:
+            # no conversion needed, but rename the unit
+            qconv['unit'] = u2
+            return qconv
+        if u2 == 'amu':
+            if u1 == 'kg':
+                v2 = v1 / AMU_KG
+            elif u1 == 'me':
+                v2 = v1 / AMU_AU
+            else:
+                v2 = None
+        elif u2 == 'kg':
+            if u1 == 'amu':
+                v2 = v1 * AMU_KG
+            elif u1 == 'me':
+                v2 = v1 / AMU_AU * AMU_KG
+            else:
+                v2 = None
+        elif u2 == 'me':
+            if u1 == 'amu':
+                v2 = v1 * AMU_AU
+            elif u1 == 'kg':
+                v2 = v1 / AMU_KG * AMU_AU
+            else:
+                v2 = None
+        else:
+            v2 = None
+    else:
+        v2 = None
+    if v2 is None:
+        # failure
+        print_err('', 'unable to convert ({} {}) to {}'.format(v1, 
+            quantity['unit'], target_unit))
+    qconv['unit'] = u2
+    qconv[vkey] = v2
+    return qconv
+##
 def RRHO_symmtop(freqs, Emax, binwidth, ABC_GHz, Bunit='GHz'):
     # RRHO with symmetric-top approximation.
     # Use Stein-Rabinovitch counting method (less roundoff error than 
@@ -68,7 +274,7 @@ def rotational_levels_symmtop(ABC, Emax, Bunit='cm-1'):
     ABC[::-1].sort()  # sort in descending order
     if Bunit.lower() == 'ghz':
         # convert ABC to cm^-1
-        ABC *= 1.0e7 / clight
+        ABC *= 1.0e7 / CLIGHT
     if (ABC[0]-ABC[1] > ABC[1]-ABC[2]):
         # call it prolate
         B = np.sqrt(ABC[1]*ABC[2])  # geometric mean; "perpendicular"
@@ -107,7 +313,7 @@ def rotational_levels_spherical(B, Emax, Bunit='cm-1'):
     # 'Emax' is the upper bound on energy, in cm^-1
     if Bunit.lower() == 'ghz':
         # convert B to cm^-1
-        B *= 1.0e7 / clight
+        B *= 1.0e7 / CLIGHT
     Jmax = int(-0.5 + 0.5 * np.sqrt(1 + 4*Emax/B))
     J = np.arange(Jmax+1)  # all allowed values of J, including Jmax
     E = B * J * (J+1)
@@ -122,7 +328,7 @@ def rotational_levels_linear(B, Emax, Bunit='cm-1'):
     # 'Emax' is the upper bound on energy, in cm^-1
     if Bunit.lower() == 'ghz':
         # convert B to cm^-1
-        B *= 1.0e7 / clight
+        B *= 1.0e7 / CLIGHT
     Jmax = int(-0.5 + 0.5 * np.sqrt(1 + 4*Emax/B))
     J = np.arange(Jmax+1)  # all allowed values of J, including Jmax
     E = B * J * (J+1)
@@ -152,11 +358,11 @@ def thermo_RRHO(T, freqs, symno, ABC_GHz, mass, pressure=1.0e5, deriv=0):
     lnQ = lnQvrt(T, freqs, symno, ABC_GHz, mass)
     d = lnQvrt(T, freqs, symno, ABC_GHz, mass, deriv=1)  # derivative of lnQ
     deriv = T * d + lnQ  # derivative of TlnQ
-    S = Rgas * (deriv - np.log(avogadro) + 1)
+    S = RGAS * (deriv - np.log(AVOGADRO) + 1)
     d2 = lnQvrt(T, freqs, symno, ABC_GHz, mass, deriv=2)  # 2nd derivative of lnQ
     deriv2 = 2 * d + T * d2  # 2nd derivative of TlnQ
-    Cp = Rgas + Rgas * T * deriv2
-    ddH = Rgas * T * (1 + T * d) / 1000
+    Cp = RGAS + RGAS * T * deriv2
+    ddH = RGAS * T * (1 + T * d) / 1000
     return (S, Cp, ddH)
 ##
 def lnQvrt(T, freqs, symno, ABC_GHz, mass, pressure=1.0e5, deriv=0):
@@ -180,11 +386,11 @@ def lnQtrans(T, mass, pressure=1.0e5, deriv=0):
     if deriv == 2:
         # return (d2/dT2)lnQ = -(3/2T**2)
         return (-1.5 / (T*T))
-    kT = boltzmann * T  # in J
-    m = mass * amu_kg   # in kg
-    V = Rgas * T / pressure  # in m**3
+    kT = BOLTZMANN * T  # in J
+    m = mass * AMU_KG   # in kg
+    V = RGAS * T / pressure  # in m**3
     lnQ = 1.5 * np.log(2 * np.pi * m * kT)
-    lnQ -= 3 * np.log(planck)
+    lnQ -= 3 * np.log(PLANCK)
     lnQ += np.log(V)
     return lnQ
 ##
@@ -212,7 +418,7 @@ def lnQrot(T, symno, ABC_GHz, deriv=0):
         else:
             # non-linear
             return (-1.5 / (T*T))
-    ln_kTh = np.log(T) + np.log(boltzmann) - np.log(planck)  # ln(kT/h) expressed in ln(Hz)
+    ln_kTh = np.log(T) + np.log(BOLTZMANN) - np.log(PLANCK)  # ln(kT/h) expressed in ln(Hz)
     if n < 3:
         # linear molecule
         B = ABC_GHz[0] * 1.0e9  # convert to Hz
@@ -229,10 +435,10 @@ def lnQvib(T, freqs, deriv=0):
     # Given a temperature (in K) and array of vibrational 
     #   frequencies (in cm^-1), return ln(Q) where Q is
     #   the harmonic-oscillator partition function.
-    kTh = T * boltzmann / planck  # kT/h expressed in Hz
+    kTh = T * BOLTZMANN / PLANCK  # kT/h expressed in Hz
     lnQ = 0.
     nu = freqs * 100 # convert to m^-1 (as array)
-    nu = nu * clight # convert to Hz
+    nu = nu * CLIGHT # convert to Hz
     fred = nu / kTh # reduced frequencies
     x = np.exp(-fred)  # exponentiated, reduced frequencies
     xm1 = 1 - x
@@ -276,19 +482,33 @@ def parse_ZMatrix(zlist, unitR='angstrom', unitA='degree'):
     refat = []
     var = []
     val = {}
-    intop = True
-    maxlen = 0  # keep track of max number of words in line, 
-    #  because its decrease will signal the beginning of the
-    #  second section of the z-matrix (if any)
+    # split lines on whitespace, comma, or equals
     regexSplit = re.compile('[\s,=]+')
+    iline = 0
+    intop = True
     for line in zlist:
-        words = regexSplit.split(line)  # split on whitespace, comma, or equals
+        line = line.strip()
+        words = list(filter(None, regexSplit.split(line)))
         nwords = len(words)
-        if nwords < 1:
-            continue  # ignore blank line
-        maxlen = max(maxlen, nwords)
-        if nwords < maxlen:
-            intop = False
+        # check for expected number of words
+        if intop:
+            # atom definitions
+            if nwords < 1:
+                # blank line marks end of atom definitions
+                intop = False
+                continue
+            # atom definition: expect up to seven words
+            xwords = min(2 * iline + 1, 7)
+        else:
+            # inside variable-definitions block
+            if nwords < 1:
+                # blank line marks end of input
+                continue
+            # variable definition: expect two words
+            xwords = 2
+        if nwords != xwords:
+            print_err('zmatrix', 'expected {:d} words, got {:d} in {:s}'.format(xwords,
+                nwords, str(words)))
         if intop:
             # list of atoms and variable names (or floats)
             # add element symbol
@@ -308,6 +528,7 @@ def parse_ZMatrix(zlist, unitR='angstrom', unitA='degree'):
         else:
             # values of any z-matrix variables
             val[words[0]] = float(words[1])
+        iline += 1
     ZM = ZMatrix(el, refat, var, val, unitR=unitR, unitA=unitA)
     return ZM
 ##
@@ -405,7 +626,7 @@ class ZMatrix(object):
         if self.unitR == 'bohr':
             for v in self.val:
                 if self.vtype[v] == 'distance':
-                    self.val[v] *= bohr
+                    self.val[v] *= BOHR
             self.unitR = 'angstrom'
         return
     def toBohr(self):
@@ -413,7 +634,7 @@ class ZMatrix(object):
         if self.unitR == 'angstrom':
             for v in self.val:
                 if self.vtype[v] == 'distance':
-                    self.val[v] /= bohr
+                    self.val[v] /= BOHR
             self.unitR = 'bohr'
         return
     def unitX(self):
@@ -585,9 +806,9 @@ class ZMatrix(object):
                     if self.unitR != unitR:
                         # convert unit
                         if unitR == 'angstrom':
-                            value *= bohr
+                            value *= BOHR
                         else:
-                            value /= bohr
+                            value /= BOHR
                 pstr += '{:{width}s} {:f}'.format(v, value, width=wlong).rstrip('0') + '\n' # keep the decimal point
         return pstr
     def print(self):
@@ -750,9 +971,9 @@ def max_not_exceed(bigser, target):
 def hartree_eV(energy, direction='to_eV', multiplier=1):
     # convert from hartree to eV or the reverse (if direction == 'from_eV')
     if direction == 'to_eV':
-        return multiplier * energy * eV_per_hartree
+        return multiplier * energy * EV_PER_HARTREE
     elif direction == 'from_eV':
-        return multiplier * energy / eV_per_hartree
+        return multiplier * energy / EV_PER_HARTREE
     else:
         # illegal direction
         return 'unrecognized direction = {:s} in routine hartree_eV'.format(direction)
@@ -1040,9 +1261,9 @@ class Geometry(object):
         imat = centered.inertia_tensor()
         moment, axes = np.linalg.eigh( imat )
         # convert moment to kg.m^2, assuming distances in angstrom and masses in u
-        moment /= 1.0e20 * avogadro * 1000.0
-        rotconst = planck / ( 8 * np.pi * np.pi * clight * moment )   # now in units (1/m)
-        rotconst *= clight * 1.0e-9      # now in GHZ
+        moment /= 1.0e20 * AVOGADRO * 1000.0
+        rotconst = PLANCK / ( 8 * np.pi * np.pi * CLIGHT * moment )   # now in units (1/m)
+        rotconst *= CLIGHT * 1.0e-9      # now in GHZ
         return rotconst, moment, axes        
     def center(self, origin=np.zeros(3), use_masses=True):
         # translate molecule to set center of mass at 'origin'
@@ -1128,7 +1349,7 @@ class Geometry(object):
         if self.units == 'bohr':
             # multiply all coordinates by 'bohr' constant 
             for a in self.atom:
-                a.xyz *= bohr
+                a.xyz *= BOHR
             self.units = 'angstrom'
         return
     def toBohr(self):
@@ -1136,7 +1357,7 @@ class Geometry(object):
         if self.units == 'angstrom':
             # divide all coordinates by 'bohr' constant 
             for a in self.atom:
-                a.xyz /= bohr
+                a.xyz /= BOHR
             self.units = 'bohr'
         return
     def toUnits(self, unitS):
@@ -1197,7 +1418,7 @@ class Geometry(object):
                     f.write(self.XmolXYZ(comment=comment))
             else:
                 # print to stdout
-                print(self.XmolXYZ())
+                print(self.XmolXYZ(comment=comment))
         return
     def separateXYZ(self):
         # return a list with two elements: 
@@ -1228,12 +1449,12 @@ class Geometry(object):
             # convert vector to Geometry units
             if self.units == 'angstrom':
                 if unitS[0] == 'bohr':
-                    vec *= bohr
+                    vec *= BOHR
                 else:
                     print('** unrecognized units: unitS[0] = {:s}'.format(unitS[0]))
             elif self.units == 'bohr':
                 if unitS[0] == 'angstrom':
-                    vec /= bohr
+                    vec /= BOHR
                 else:
                     print('** unrecognized units: unitS[0] = {:s}'.format(unitS[0]))
             else:
@@ -1245,7 +1466,7 @@ class Geometry(object):
             else:
                 self.atom[i].newxyz(triples[i])
         return
-    def stoichiometry(self):
+    def stoichiometry(self, as_dict=False):
         # stoichiometry string (without charge or spin multiplicity)
         order = ['C', 'H', 'N', 'O', 'F', 'Cl', 'S', 'P']
         # build hash of elements and their atom counts
@@ -1255,6 +1476,8 @@ class Geometry(object):
                 acount[a.el] += 1
             except:
                 acount[a.el] = 1
+        if as_dict:
+            return acount
         stoich = ''
         for e in order:
             if e in acount:
@@ -1279,9 +1502,9 @@ class Geometry(object):
             print(s)
             return np.nan
         if unit == 'angstrom' and self.units == 'bohr':
-            d *= bohr  # convert bohr to angstrom
+            d *= BOHR  # convert bohr to angstrom
         if unit == 'bohr' and self.units == 'angstrom':
-            d /= bohr  # convert angstrom to bohr
+            d /= BOHR  # convert angstrom to bohr
         return d
     def vec(self, i, j, norm=None):
         # return the vector pointing from atom i to atom j
@@ -1392,9 +1615,9 @@ class Geometry(object):
         xyz = [a.xyz for a in self.atom]
         dmat = cdist(xyz, xyz, metric='euclidean')
         if unit == 'angstrom' and self.units == 'bohr':
-            dmat *= bohr  # convert bohr to angstrom
+            dmat *= BOHR  # convert bohr to angstrom
         if unit == 'bohr' and self.units == 'angstrom':
-            dmat /= bohr  # convert angstrom to bohr
+            dmat /= BOHR  # convert angstrom to bohr
         return dmat
     def connection_table(self, tol=1.3):
         # return a connection table:  a 2D array indicating bonded distances (= 0 or 1)
@@ -2088,13 +2311,13 @@ def vib_harmonic(fc, mass, sayvetz=False, xyz=[]):
         wmat = np.outer(mwt, mwt) # mass-weighting matrix
         # apply the mass-weighting matrix to the force constants
         wfc = np.multiply(fc, wmat)
-        wfc /= amu_au  # mass-weighted force constant matrix in atomic units
+        wfc /= AMU_AU  # mass-weighted force constant matrix in atomic units
         eigval, eigvec = np.linalg.eigh(wfc)
         esign = np.sign(eigval)   # save the sign of each eigenvalue
         eigval = np.fabs(eigval)      # all values are now positive
         eigval = np.sqrt(eigval)
         eigval = np.multiply(esign, eigval)      # imaginary frequencies are "negative"
-        eigval *= au_wavenumber
+        eigval *= AU_WAVENUMBER
         if not sayvetz:
             # no projections; return eigenvectors as rows
             return eigval, eigvec.T
@@ -2236,7 +2459,7 @@ def vib_harmonic(fc, mass, sayvetz=False, xyz=[]):
             igval = np.fabs(igval)      # all values are now positive
             igval = np.sqrt(igval)
             igval = np.multiply(esign, igval)      # imaginary frequencies are "negative"
-            igval *= au_wavenumber
+            igval *= AU_WAVENUMBER
             print('Frequencies after projection:\n', igval)
             print('Ratios:\n', np.divide(igval, eigval))
             return eigval, eigvec.T
@@ -2334,7 +2557,7 @@ def angle_canon(a, unit='radian'):
     return -c
 ##
 def in_bounds(x, target, tolerance):
-    # is 'x' in the range 'target' +- 'tolerance' ?
+    # is 'x' in the open interval 'target' +- 'tolerance' ?
     tolerance = np.abs(tolerance)
     return ( (x < target+tolerance) and (x > target-tolerance) )
 ##
@@ -2364,49 +2587,6 @@ def smoothing(x, y, x2, style='gau', width=-1, normalize=True):
             t = t / t.sum()
         y2 = y2 + t * y[i]
     return y2
-##
-getframe_expr = 'sys._getframe({}).f_code.co_name'
-def print_err(errtype, name='', halt=True):
-    # print a line about the error, with the name of the function
-    if errtype == 'code':
-        msg = '*** Unrecognized quantum chemistry code "{:s}"'.format(name)
-    elif errtype == 'io':
-        msg = '*** Unrecognized I/O code "{:s}"'.format(name)
-    elif errtype == 'write_fail':
-        msg = '*** Failure writing file "{:s}"'.format(name)
-    elif errtype == 'open_fail':
-        msg = '*** Failure opening file "{:s}"'.format(name)
-    elif errtype == 'autodetect':
-        msg = '*** Autodection failure'
-        print(msg)
-        1/0
-    elif errtype == 'task':
-        msg = '*** Unrecognized task "{:s}"'.format(name)
-    elif errtype == 'atom_order':
-        msg = '*** Inconsistent atom ordering ({:s})'.format(name)
-    elif errtype == 'coordtype':
-        msg = '*** Unrecognized type of coordinates "{:s}"'.format(name)
-    elif errtype == 'maxiter':
-        msg = '*** Maximum number of iterations ({:d}) exceeded'.format(name)
-    elif errtype == 'option':
-        msg = '*** Unrecognized option:'.format(name)
-    else:
-        # generic message
-        if halt:
-            msg = '*** Fatal error: "{:s}"'.format(name)
-        else:
-            msg = '*** Error: "{:s}"'.format(name)
-    # add name of calling routine
-    caller = eval(getframe_expr.format(2))
-    msg += ' in {:s}()'.format(caller)
-    if halt:
-        # print the message and exit
-        #   may cause trouble with 'multiprocessing' module
-        sys.exit(msg)
-    else:
-        # just print the message, then return
-        print(msg)
-    return
 ##
 def joinGeometries(Glist):
     # Given a list of Geometry objects, return a single Geometry
@@ -2504,4 +2684,99 @@ def average_structure(Struct1, Struct2, weight1=0.5, weight2=0.5):
     unitS = Struct1.unitX()
     Result.fromVector(v3, unitS)
     return Result
+##
+def print_dict(nestdict, indent=0, space='    '):
+    # nice printing of nested dict
+    spacing = space * indent
+    for k in sorted(nestdict):
+        if isinstance(nestdict[k], dict):
+            print(spacing+k+':')
+            print_dict(nestdict[k], indent+1)
+        else:
+            print(spacing+k+':', nestdict[k])
+##
+def dict_delkey(d, key):
+    # delete one or more keys from a dict, if present
+    # return the number of keys deleted
+    # 'key' can be a list or a scalar (including string)
+    ndel = 0
+    if isinstance(key, list):
+        for k in key:
+            if dict_delkey(d, k):
+                ndel += 1
+    else:
+        # simple key
+        if key in d:
+            del d[key]
+            ndel = 1
+    return ndel
+##
+def backfill_dict(defaults, userinput):
+    # recursively install any missing entries in dict 'userinput',
+    # based upon default values in dict 'defaults'
+    # return False on non-dict arguments, else True
+    if not (isinstance(defaults, dict) and isinstance(userinput, dict)):
+        # this routine does not apply
+        return False
+    for key in defaults:
+        if key in userinput:
+            try:
+                backfill_dict(defaults[key], userinput[key])
+            except:
+                # probably at the bottom of the structure
+                pass
+        else:
+            userinput[key] = defaults[key]
+    return True
+##
+getframe_expr = 'sys._getframe({}).f_code.co_name'
+def print_err(errtype, details='', halt=True):
+    # print a line about the error, with the name of the function
+    if errtype ==   'code':
+        msg = '*** Unrecognized quantum chemistry code "{:s}"'.format(details)
+    elif errtype == 'io':
+        msg = '*** Unrecognized I/O code "{:s}"'.format(details)
+    elif errtype == 'write_fail':
+        msg = '*** Failure writing file "{:s}"'.format(details)
+    elif errtype == 'open_fail':
+        msg = '*** Failure opening file "{:s}"'.format(details)
+    elif errtype == 'autodetect':
+        msg = '*** Autodection failure'
+        print(msg)
+        1/0
+    elif errtype == 'task':
+        msg = '*** Unrecognized task "{:s}"'.format(details)
+    elif errtype == 'atom_order':
+        msg = '*** Inconsistent atom ordering ({:s})'.format(details)
+    elif errtype == 'coordtype':
+        msg = '*** Unrecognized type of coordinates "{:s}"'.format(details)
+    elif errtype == 'maxiter':
+        msg = '*** Maximum number of iterations ({:d}) exceeded'.format(details)
+    elif errtype == 'option':
+        msg = '*** Unrecognized option: {:s}'.format(details)
+    elif errtype == 'units':
+        msg = '*** Unrecognized or inappropriate units: {:s}'.format(details)
+    elif errtype == 'need_int':
+        msg = '*** Integer required: {:s}'.format(details)
+    elif errtype == 'zmatrix':
+        msg = '*** Zmatrix input problem: {:s}'.format(details)
+    elif errtype == 'undone':
+        msg = '*** Feature not yet implemented: {:s}'.format(details)
+    else:
+        # generic message
+        if halt:
+            msg = '*** Fatal error: "{:s}"'.format(details)
+        else:
+            msg = '*** Error: "{:s}"'.format(details)
+    # add name of calling routine
+    caller = eval(getframe_expr.format(2))
+    msg += ' in {:s}()'.format(caller)
+    if halt:
+        # print the message and exit
+        #   may cause trouble with 'multiprocessing' module
+        sys.exit(msg)
+    else:
+        # just print the message, then return
+        print(msg)
+    return
 ##

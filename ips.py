@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-# Isopotential searching, take 3
+# Isopotential searching, 3rd implementation
 # Karl Irikura, NIST 2017
 #
 import numpy as np
@@ -8,47 +8,62 @@ import sys, os
 from chem_subs import *
 from qm_subs import *
 from ips_subs import *
+DEFAULT_CONFIG_FILE = 'ips_defaults.yml'
 #
-try:
-    input_file = sys.argv[1]
-    if not os.path.isfile(input_file):
-        # maybe user did not include the file suffix
-        input_file += '.ips'
-    ips_input = read_input(input_file)
-except IOError:
-    print('*** Failure reading input file')
-    sys.exit('Usage: ips.py <name of IPS input file>')
-print('Reading input file "{:s}"'.format(input_file))
-ips_input = parse_input(ips_input)
-confirm_newstart(ips_input)
-algorithm = ips_input['method'][0]
+if len(sys.argv) < 2:
+    sys.exit('\tUsage: ips.py <name of IPS input file>')
+input_file = sys.argv[1]
+if not os.path.isfile(input_file):
+    # maybe user did not include the file suffix
+    input_file += '.yml'
+ips_input = read_yinput(input_file, DEFAULT_CONFIG_FILE)
+ips_input = parse_yinput(ips_input)
+print('Processed input file "{:s}" and defaults file "{:s}":'.format(input_file,
+       DEFAULT_CONFIG_FILE))
+print_dict(ips_input, indent=1)
+algorithm = ips_input['ips_method']['name']
 coordtype = ips_input['coordtype']
-if not coordtype in ['cartesian', 'zmatrix']:
-    print_err('coordtype', coordtype)
 inputCoord = ips_input[coordtype].copy()   # save input geometry
 inputUnits = inputCoord.unitX()   # save input units
 code = ips_input['code']
 molec = ips_input['molecule']
-print_dict(ips_input)
 if not ips_input['continuation']:
     # this is a fresh start
+    confirm_newstart(ips_input)
     # is pre-minimization requested?
     if ips_input['minimize']:
         print('Running requested geometry optimization.')
-        Emin, optCoord, IDx = qm_function(ips_input, 'minimize', fileroot='{:s}_E0_geometry'.format(molec))
-        if not (Emin and optCoord):
+        froot_min = '{:s}_E0_geometry'.format(molec)
+        Emin, optCoord, IDx = qm_function(ips_input, 'minimize', fileroot=froot_min)
+        #if not (Emin and optCoord):
+        if Emin is None:
             # the geometry optimization failed
-            sys.exit('You have to figure out why the geometry optimization failed.')
+            q = input('** The geometry optimization failed. Do you want to keep trying? ')
+            if 'y' in q:
+                # yes, try again.  'optCoord' is actually a file name in this situation
+                qmout = optCoord
+                ips_input['cartesian'] = read_qm_Geometry(code, qmout)[-1]
+                E_last = read_qm_E_scf(code, qmout)[-1]
+                print('\t--trying again starting from E = {:.5f}'.format(E_last))
+                mv_file_failed(qmout)  # rename the old output file
+                Emin, optCoord, IDx = qm_function(ips_input, 'minimize', fileroot=froot_min)
+                if Emin is None:
+                    print('** The geometry optimization failed again.')
+                    sys.exit('Try a different initial geometry.')
+            else:
+                sys.exit('Try a different initial geometry.')
         E0 = Emin
         install_unit_masses(optCoord)
         # install the optimized coordinates in 'ips_input'
         ips_input[coordtype] = optCoord.copy()
         # save coordinates to a file called '{molec}_E0_geometry.xyz'
         optCoord.printXYZ('{:s}_E0_geometry.xyz'.format(molec), comment='Minimized structure for {:s}, E = {:.6f}'.format(molec, E0))
+        print('Minimized cartesians written to file {:s}_E0_geometry.xyz'.format(molec))
         if coordtype == 'zmatrix':
             # also save optimized z-matrix 
             with open('{:s}_E0_geometry.zmt'.format(molec), 'w') as zmf:
                 zmf.write(optCoord.printstr())
+            print('Minimized z-matrix written to file {:s}_E0_geometry.zmt'.format(molec))
         grad = np.zeros(optCoord.nDOF())  # the gradient should be zero
     else:
         # calculate initial energy and gradient
@@ -61,9 +76,9 @@ if not ips_input['continuation']:
     ips_input['E0_geom'] = E0_geom
     store_E0(ips_input, E0)
     #
-    print('Target electronic energy is E = {:.5f}'.format(E0 + ips_input['energy']/au_kjmol))
+    Etarget = E0 + convert_unit(ips_input['energy'], 'hartree')['value']
+    print('Target electronic energy is E = {:.5f} hartree'.format(Etarget))
     # Find the necessary seed points at the target energy and create the Walkers
-    # 'walkers' is a list of Walkers
 else:
     # this is continuing from where a previous calculations stopped
     # read reference geometry and walkers[] from the pickle file
@@ -82,6 +97,7 @@ if (coordtype == 'zmatrix'):
 if not ips_input['continuation']:
     if __name__ == '__main__':
         # generate seed points
+        # 'walkers' is a list of Walkers
         walkers = seed_points(ips_input)
     if algorithm == 'mrwips':
         if not 'stepl' in ips_input:
@@ -94,7 +110,7 @@ if not ips_input['continuation']:
                 vec = W.Coord.toVector()
                 meanR += np.linalg.norm(vec - vec0)
             meanR /= len(walkers)
-            ips_input['stepl'] = ips_input['step_angle'] * meanR
+            ips_input['stepl'] = ips_input['ips_method']['step_angle'] * meanR
     print('Molecule contains {:d} atoms.'.format(E0_geom.natom()))
     print('Starting search using algorithm "{:s}"'.format(algorithm))
     print('Maximum step length = {:.2f}'.format(ips_input['stepl']))
@@ -169,4 +185,4 @@ elif algorithm == 'mrwips':
         else:
             print('Search halted by user request.')
 else:
-    print('*** Unknown method requested:', ips_input['method'])
+    print('*** Unknown method requested:', algorithm)

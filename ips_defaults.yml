@@ -1,0 +1,128 @@
+# Defaults for IPS input.
+# Will be supersed by anything in user input file.
+
+# parallelism
+nprocs: 1
+
+# Restarting from saved files?
+continuation: yes
+# If starting fresh, delete old files without prompting?
+silent_delete: no
+
+# Pre-minimization to generate the starting structure?
+minimize: yes
+
+# suppress molecular rotation?
+suppress_rotation: yes
+
+# Energy is relative to the initial structure, unless
+# pre-minimization is requested, in which case it's
+# relative to the minimized energy.
+# For energy units, allow 'hartree', 'kj', 'kcal', 'ev'
+energy:
+    # user must supply a value
+    unit: kj/mol
+
+# Tolerance is the tolerance on the energy (acceptable range).
+tolerance: 
+    value: 10
+    unit: kj/mol
+
+# a random_kick moves the coordinates at intervals
+random_kick:
+    how_often: 0  # zero means never
+    how_much: 0
+    unit: angstrom
+
+# Ramp indicates how often the target energy should be raised,
+# and by how much.  Units can be specified as a third field.
+ramp:
+    how_often: 0  # zero means never
+    how_much: 0
+    unit: kj/mol
+
+# maximum total step length
+max_stepl:
+    unit: ang
+
+# maximum step length for any single atom
+max_stepl_atom:
+    value: 0.5
+    unit: ang
+
+# desired step length (per atom basis) (lowest priority)
+stepl_atom:
+    value: 0.1
+    unit: ang
+
+# desired total step length (highest priority)
+stepl:
+    unit: ang
+
+# The net charge on the molecule
+charge: 0
+
+# spin multiplicity
+spinmult: singlet
+
+# unit for input coordinates (bohr or angstrom)
+coord_unit: angstrom
+
+# stretching tolerance for calling two atoms bonded
+bondtol: 1.3
+
+# distance threshold for calling system dissociated
+# zero value means to ignore dissociation
+dissociated: 0.
+
+# Recognized code names: gaussian09 or quantum-espresso
+code: gaussian09
+
+# periodic boundary conditions (PBC)?
+pbc: 
+    use_pbc: no
+    # only simple cubic lattice is available
+    edge:
+        unit: ang
+
+# options for all known quantum chemistry codes
+# User's input file implicitly applies only to the
+#   requested code, so omits the code-name layer of structure
+code_options:
+    gaussian09:
+        # theoretical method
+        theory: hf
+        basis:  3-21g
+        xqc:    True  # scf=xqc
+    quantum-espresso:
+        control:
+            calculation: scf
+            restart_mode: from_scratch
+            tprnfor: True
+            forc_conv_thr: 1.0D-3
+            outdir: /wrk/irikura/qe
+            pseudo_dir: /home/irikura/qe_6.2.1/pseudo/
+            nstep: 100
+        system:
+            ibrav: 1
+            ecutwfc: 25
+            ecutrho: 200
+            nosym: True
+            occupations: smearing
+            degauss: 0.005
+        electrons:
+            conv_thr: 1.0D-6
+            mixing_beta: 0.5
+        k_points: gamma
+        # default pseudopotential files <element symbol>.<'pseudo'>
+        basis: pz-hgh.UPF
+    # the option 'command' is for a list of strings that are to be added
+    #   directly to the quantum code's command line without change
+    #   example below (for Gaussian09)
+    #command:
+    #   - pop=nbo
+    #   - stable=opt
+
+# extra output
+verbose: False
+
