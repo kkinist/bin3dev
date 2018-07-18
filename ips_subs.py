@@ -1,7 +1,8 @@
 # Functions to support isopotential searching (python3)
 # KK Irikura, NIST 2017
 #
-import re, sys, copy, glob, os, pickle
+DEFAULT_CONFIG_FILE = 'ips_defaults.yml'
+import re, sys, copy, glob, os, pickle, glob
 import numpy as np
 import pandas as pd
 import multiprocessing as mp
@@ -717,7 +718,7 @@ def seek_qm_energy(ips_input, ID=0, dX0=None, maxiter=20, trustR=0.5):
             return E, Geom, grad, itry, ID
         # keep looking
         if ips_input['verbose']:
-            print('\tvv itry = {:d} for ID = {:d} gives Erel = {:.1f} (eratio = {:.1f}, erratio = {:.1f})'.format(itry, ID, erel, eratio, erratio))
+            print('\tvv iter {:d} for ID = {:d} gives Erel = {:.1f} (eratio = {:.1f}, erratio = {:.1f})'.format(itry+1, ID, erel, eratio, erratio))
         # return to top of loop unless special situations below
         if (eratio > 2) and (erratio > 10):
             # landed much too high (use double test in case of very low target energy)
@@ -772,26 +773,26 @@ def read_qm_energy(code, theory, qmout):
         Elist = read_qm_E_scf(code, qmout)
     return Elist
 ##
-def qm_function(ips_input, task, verbose=False, option='', unitR='', ID='qm_function_noname', fileroot=''):
-    # use quantum chemistry program to perform the specified task
+def qm_function(ips_input, task, option='', unitR='', 
+                ID='qm_function_noname', fileroot=''):
+    # use a quantum chemistry program to perform the specified task
+    #   more than one calculation may be needed
     # output may be modified by 'option'
     # angular forces returned in hartree/radian
     # distance forces returned in hartree/unitR
     # 'ID' is an identifier (any dtype) to avoid filename collisions in parallel computations
     #   'ID' is used only if 'fileroot' is blank
-    if not task in ['minimize', 'gradient', 'force', 'energy']:
-        # the requested task is not implemented
-        print_err('task', task)
-    qminp = write_qm_input_ips(ips_input, task, ID, fileroot=fileroot)  #  'qminp' is name of QM input file
     code = ips_input['code']
-    qmout = run_qm_job(code, qminp)
+    qminp = write_qm_input_ips(ips_input, task, ID, fileroot=fileroot)
+    # 'qminp' is name of QM input file(s)
+    qmout = run_qm_task(code, qminp, task)
     # did it succeed?
-    success = qm_calculation_success(code, task, qmout[0])
-    if not success:
+    qmfail = qm_calculation_failure(code, task, qmout)
+    if qmfail:
         if task == 'minimize':
             # geometry optimization failed: try harder 
             problem = qm_diagnose(code, task, qmout[0])
-            if verbose:
+            if ips_input['verbose']:
                 print('\tInitial geometry optimization failed: see {:s}'.format(qmout[0]))
             # regardless of the problem, just try again using the 
             #   last (cartesian) coordinates in the failed optimization
@@ -802,31 +803,41 @@ def qm_function(ips_input, task, verbose=False, option='', unitR='', ID='qm_func
                 ips_input['cartesian'] = ips_input['zmatrix'].toGeometry()
             ips_input['cartesian'] = read_qm_Geometry(code, qmout[0])[-1]
             E_last = read_qm_E_scf(code, qmout[0])[-1]
-            if verbose:
+            if ips_input['verbose']:
                 print('\t--trying again starting from E = {:.5f}'.format(E_last))
             mv_file_failed(qmout[0])  # rename the old output file
-            qminp = write_qm_input_ips(ips_input, task, ID, fileroot=fileroot)  #  'qminp' is name of QM input file
-            qmout = run_qm_job(code, qminp)
-            success = qm_calculation_success(code, task, qmout[0])
+            qminp = write_qm_input_ips(ips_input, task, ID, fileroot=fileroot)
+            # 'qminp' is name of QM input file(s)
+            qmout = run_qm_task(code, qminp, task)
+            qmfail = qm_calculation_failure(code, task, qmout)
         else:
             # non-minimization QM calculation failed; write error log and return failure
             qmerrlog = 'qm_err.log'
-            with open(qmerrlog, 'a') as ferr, open(qmout[0], 'r') as badout:
-                ferr.write('QM failure for file {:s}'.format(qmout[0]))
+            ifail = qmfail - 1  # index of bad ouput file in list
+            with open(qmerrlog, 'a') as ferr, open(qmout[ifail], 'r') as badout:
+                ferr.write('QM failure for file {:s}'.format(qmout[ifail]))
                 for line in badout:
                     ferr.write(line)
-            if verbose:
+            if ips_input['verbose']:
                 print('*** QM calculation failed at task "{:s}"'.format(task) +
                     '; see file "{:s}"'.format(qmerrlog))
             # return energy as None and name of output file instead of geometry
-            return None, qmout[0], ID
+            return None, qmout[ifail], ID
     # get the energy
     Elist = read_qm_energy(ips_input['code'], ips_input['theory'], qmout[0])
-    if task == 'energy':
+    if task == 'charges':
+        # delete the unneeded *.pdos* files
+        print('XXX qmout:', str(qmout))
+        flist = glob.glob('{:s}.pdos*'.format(os.path.splitext(qmout[0])[0]))
+        for f in flist:
+            print('DDD removing {:s}'.format(f))
+            os.remove(f)
+    if task in ['energy', 'charges']:
+        # charges will be extracted elsewhere
         return Elist[-1], qmout, ID
     coordtype = ips_input['coordtype']
     if task == 'minimize':
-        if verbose:
+        if ips_input['verbose']:
             print('Initial E = {:.6f}; minimized E = {:.6f}'.format(Elist[0], Elist[-1]))
         # also retrieve coordinates
         if coordtype == 'cartesian':
@@ -905,13 +916,11 @@ def parse_yinput(input_raw):
     keyw_measure = {'energy'  : ['energy', 'tolerance', 'ramp'],
                     'distance': ['stepl', 'stepl_atom', 
                                  'max_stepl', 'random_kick',
-                                 'max_stepl_atom']}
+                                 'max_stepl_atom', 'spread_dist']}
     known_units  = {'energy'  : ['kcal/mol', 'ev', 'hartree', 'kj/mol'],
                     'distance': ['bohr', 'ang']}
     pref_unit    = {'energy'  : 'kj/mol',
                     'distance': 'angstrom'}
-    #unit_conver  = {'energy'  : [KCAL_KJ, EV_KJMOL, au_kjmol, 1.0],
-    #                'distance': [bohr, 1.0]}
     # some theories do not have an explicit basis set
     no_basis = ['am1', 'pm3', 'pm6']
     # some keywords require integer values
@@ -1147,6 +1156,8 @@ def cleanup_code_options(code, code_options):
             'system'   : ['ecutwfc', 'ecutrho', 'occupations', 'degauss',
                 'ntyp', 'nat'],
             'electrons': ['conv_thr', 'mixing_beta'],
+            'projwfc'  : ['outdir', 'ngauss', 'degauss', 'emin', 'emax',
+                'deltae'],
             'ions'     : ['']}
         block_names = list(block_opts.keys())
         # move unassigned code_options inside the appropriate block
@@ -1394,7 +1405,7 @@ def parse_input(input_raw):
     if not 'code_options' in parsed:
         parsed['code_options'] = []
     if not 'dissociated' in parsed:
-        # distance threshold for judging dissociation
+        # distance of separation for judging dissociation
         parsed['dissociated'] = 0.  # default is to ignore
     if not 'bondtol' in parsed:
         parsed['bondtol'] = 1.3
@@ -1571,7 +1582,7 @@ def format_g09_input_ips(ips_input):
     return contents
 ##
 def write_qm_input_ips(ips_input, task='', ID=0, fileroot=''):
-    # just call the routine tailored to the quantum code
+    # create QM input file(s) and return name(s)
     code = ips_input['code']
     if code == 'gaussian09':
         fname = write_g09_input_ips(ips_input, task=task,
@@ -1593,22 +1604,32 @@ def format_qe_input_ips(ips_input, task):
         'system'   : ['ecutwfc', 'ecutrho', 'occupations', 'degauss',
             'ntyp', 'nat'],
         'electrons': ['conv_thr', 'mixing_beta'],
-        'ions'     : ['']}
+        'ions'     : [''],
+        'projwfc'  : ['outdir', 'ngauss', 'degauss', 'emin', 'emax',
+            'deltae']}
     allowed_cmd = [x for y in amp_cmd for x in amp_cmd[y]]
     allowed_cmd += ['k_points']
     # require that blocks appear in a specific order
-    block_names = ['control', 'system', 'electrons', 'ions']
+    block_names = ['control', 'system', 'electrons', 'ions', 'projwfc']
     code_options = ips_input['code_options']
-    if task == 'gradient':
+    if task != 'charges':
+        # remove the PROJWFC section
+        del amp_cmd['projwfc']
+        block_names.remove('projwfc')
+    else:
+        # remove everything except PROJWFC
+        amp_cmd = amp_cmd['projwfc']
+        block_names = ['projwfc']
+    if task in ['gradient', 'energy']:
         # remove the IONS section
         del amp_cmd['ions']
         block_names.remove('ions')
-    if False:
+    '''
         # move unassigned 'code_options' inside the appropriate section
         # user may not specify 'title' or 'prefix'
         dict_delkey(code_options, ['title', 'prefix'])
         for block in block_names:
-            # create a separate lists for each &section
+            # create a separate list for each &section
             if block not in code_options:
                 code_options[block] = {}
         to_delete = []
@@ -1620,12 +1641,11 @@ def format_qe_input_ips(ips_input, task):
                     code_options[block][opt] = code_options[opt]
                     to_delete.append(opt)
         dict_delkey(code_options, to_delete)
+    '''
     # get PBC parameters
     pbc_opts = ips_input['pbc']
-    if 'ang' in pbc_opts['edge']['unit']:
-        # QE requires celldm in bohr; convert
-        pbc_opts['edge']['value'] /= BOHR
-        pbc_opts['edge']['unit'] = 'bohr'
+    # QE requires celldm in bohr
+    pbc_opts['edge'] = convert_unit(pbc_opts['edge'], 'bohr')
     code_options['system']['celldm(1)'] = pbc_opts['edge']['value']
     # compute 'ntyp' (no. of atom types) and 'natom' (no. of atoms)
     coordtype = ips_input['coordtype']
@@ -1673,28 +1693,33 @@ def format_qe_input_ips(ips_input, task):
     # k points
     no_amp += 'K_POINTS {:s}\n'.format(code_options['k_points'])
     contents['amp'] = amp_str
-    contents['noamp'] = no_amp
+    if task == 'charges':
+        contents['noamp'] = ''
+    else:
+        contents['noamp'] = no_amp
     return contents
 ##
 def write_qe_input_ips(ips_input, task='', ID=0, fileroot=''):
     # write an input file for Quantum Espresso based upon the ips_input
     # 'task' may indicate one additional action:
-    #   'minimize', 'gradient', 'freq'
+    #   'minimize', 'gradient', 'freq', 'charges'
     # 'ID' is an identifier (any dtype) to avoid filename collisions in parallel jobs
     #   it's only used if 'fileroot' is blank
     # 'fileroot' will be used to construct the filenames unless blank
     #
-    code = 'quantum-espresso'
+    code = ips_input['code']
     # act upon 'task'
-    if task == 'minimize':
-        ips_input['code_options']['control']['calculation'] = 'relax'
-    if task == 'gradient':
-        # this is the default configuration
-        ips_input['code_options']['control']['tprnfor'] = True
-        ips_input['code_options']['control']['calculation'] = 'scf'
     if task == 'freq':
         # this is not yet implemented: requires ph.x instead of pw.x
         print_err('undone', 'phonon calculation using {:s}'.format(code))
+    if task == 'minimize':
+        ips_input['code_options']['control']['calculation'] = 'relax'
+    if task == 'gradient':
+        ips_input['code_options']['control']['tprnfor'] = True
+        ips_input['code_options']['control']['calculation'] = 'scf'
+    if task == 'energy':
+        ips_input['code_options']['control']['tprnfor'] = False
+        ips_input['code_options']['control']['calculation'] = 'scf'
     # create a filename and 'prefix'
     if len(fileroot) == 0:
         # create a filename
@@ -1706,9 +1731,19 @@ def write_qe_input_ips(ips_input, task='', ID=0, fileroot=''):
     ips_input['code_options']['control']['title'] = \
         'IPS calculation for {:s}'.format(ips_input['molecule'])
     filename = supply_qm_filename_suffix(code, froot, 'input')
-    # prepare the contents of the QE input file
-    contents = format_qe_input_ips(ips_input, task)
-    write_qm_input(filename, code, contents)
+    if task == 'charges':
+        ips_input['code_options']['projwfc']['prefix'] = froot
+        # need to run both pw.x and projwfc.x
+        contentsPW = format_qe_input_ips(ips_input, 'energy')
+        write_qm_input(filename, code, contentsPW)
+        contentsPROJ = format_qe_input_ips(ips_input, 'charges')
+        fn2 = supply_qm_filename_suffix(code, froot+'_proj', 'input')
+        write_qm_input(fn2, code, contentsPROJ)
+        filename = [filename, fn2]
+    else:
+        # prepare the contents of the (single) QE input file
+        contents = format_qe_input_ips(ips_input, task)
+        write_qm_input(filename, code, contents)
     return filename
 ##
 def write_g09_input_ips(ips_input, task='', ID=0, fileroot=''):
@@ -1718,8 +1753,8 @@ def write_g09_input_ips(ips_input, task='', ID=0, fileroot=''):
     # 'ID' is an identifier (any dtype) to avoid filename collisions in parallel jobs
     #   it's only used if 'fileroot' is blank
     # 'fileroot' will be used to construct the filenames unless blank
-    contents = format_g09_input_ips(ips_input)
     code = 'gaussian09'
+    contents = format_g09_input_ips(ips_input)
     # check for some possible problems
     # see if 'guess=check' is requested but the checkpoint file 
     #   does not yet exist 
@@ -1775,7 +1810,8 @@ def confirm_newstart(ips_input):
             print('{:d} files deleted.'.format(nfiles))
         else:
             # do nothing
-            print('OK, nevermind.')
+            print('Change "continuation" to "yes" and try again.')
+            sys.exit(0)
     return
 ##
 def store_E0(ips_input, E0):
@@ -1813,19 +1849,22 @@ def restore_pickle(ips_input):
         walkers = pickle.load(fpkl)
         old_input = pickle.load(fpkl)
     # merge the new into the old input commands
-    for keyw in old_input:
-        if keyw in ['code_options', 'dflood', 'stepl', 'stepl_atom', 'nprocs', 'ramp',
-            'random_kick', 'tolerance', 'steps', 'suppress_rotation', 'continuation']:
-            # overwrite with the new value
-            try:
-                old_input[keyw] = ips_input[keyw].copy()
-            except:
-                # maybe not an object
-                try:
-                    old_input[keyw] = ips_input[keyw]
-                except:
-                    # maybe missing from new input; do nothing
-                    pass
+    backfill_dict(old_input, ips_input)
+    # start at the energy where the previous run ended
+    ips_input['energy']['value'] = old_input['energy']['value']
+    #for keyw in old_input:
+    #    if keyw in ['code_options', 'dflood', 'stepl', 'stepl_atom', 'nprocs', 'ramp',
+    #        'random_kick', 'tolerance', 'steps', 'suppress_rotation', 'continuation']:
+    #        # overwrite with the new value
+    #        try:
+    #            old_input[keyw] = ips_input[keyw].copy()
+    #        except:
+    #            # maybe not an object
+    #            try:
+    #                old_input[keyw] = ips_input[keyw]
+    #            except:
+    #                # maybe missing from new input; do nothing
+    #                pass
     return walkers, old_input.copy()
 ##
 def install_unit_masses(Struct):
@@ -1890,16 +1929,16 @@ def dflood_activate(gradient, ips_input, ID=None):
         print('Now {:d} coordinates are active{:s}.'.format(len(ips_input['active']), wstring))
     return gtest
 ##
-def spread_opt(ips_input, fileroot, dist=10., IDno=None):
+def spread_opt(ips_input, fileroot, IDno=None):
     # Piecewise optimization of a nominally dissociated geometry
     #   Operates in cartesian coordinates (Geometry() object)
     #   'dist':     the space (angstrom) to put between fragments in the supermolecule
     #   'fileroot': to be used in file names (fragment number will be appended)
     #   'IDno':  to identify process when running in parallel
     # Return:
-        # list of fragment energies, 
-        # list of optimized fragment structures, and
-        # supermolecule structure
+    #   list of fragment energies, 
+    #   list of optimized fragment structures, and
+    #   supermolecule structure
     # If there is only one fragment, do nothing.
     if ips_input['coordtype'] != 'cartesian':
         # convert to Geometry()
@@ -1908,7 +1947,8 @@ def spread_opt(ips_input, fileroot, dist=10., IDno=None):
     newGeom = ips_input['cartesian']
     tol = ips_input['bondtol']
     #
-    # move the fragments apart, to distance 'dist'
+    # move the fragments apart, to distance ips_input['spread_opt']
+    dist = ips_input['spread_dist']['value']
     nfrag = newGeom.spread_fragments(dist=dist, tol=tol)
     #print('found {:d} fragments'.format(nfrag))
     if nfrag < 2:
@@ -1918,21 +1958,45 @@ def spread_opt(ips_input, fileroot, dist=10., IDno=None):
         else:
             return None, 0, 0, IDno
     #
-    # Do single-point energy to get Mulliken charges
-    ips_input['cartesian'] = newGeom  # install the new coordinates
+    
+    # Do single-point supermolecule energy to get atomic charges
+    # install the new, spread-out coordinates
+    ips_input['cartesian'] = newGeom
     froot = '{:s}_spread_mulliken'.format(fileroot)
-    Emull, qmout, IDx = qm_function(ips_input, 'energy', verbose=False, option='', unitR='', fileroot=froot)
-    #print('Single-point energy after spreading = {:.6f} (see file {:s})'.format(Emull, qmout[0]))
-    dfMulcharge = read_Mulliken_charges(qmout[0])
-    mullik = dfMulcharge.iloc[-1]['Mulliken']
-    haveSpin = 'SpinD' in list(mullik)
-    mullQ = mullik['Charge'].values
+    # if using PBC, temporarily enlarge the unit cell to accommodate
+    #   spreading the fragments apart
+    if ips_input['pbc']['use_pbc']:
+        # save the old value and increment the working value
+        edge = ips_input['pbc']['edge']['value']
+        newedge = edge + ips_input['spread_dist']['value']
+        ips_input['pbc']['edge']['value'] = newedge
+        if ips_input['verbose']:
+            print('Temporarily increasing cell size to {:.2f}'.format(newedge))
+    Emull, qmout, IDx = qm_function(ips_input, 'charges', option='', unitR='', fileroot=froot)
+    if ips_input['pbc']['use_pbc']:
+        # restore the old value
+        ips_input['pbc']['edge']['value'] = edge
+        if ips_input['verbose']:
+            print('Restoring cell size to {:.2f}'.format(edge))
+    print('### Single-point energy after spreading = {:.6f} (see file {:s})'.format(Emull, qmout[0]))
+    dfq, qtype = read_atomic_charges(qmout)
+    qtot = dfq['Charge'].sum()
+    print('### qtot = {:.3f}, ips_input[charge] = {:.3f}'.format(qtot, ips_input['charge']))
+    qerr = qtot - ips_input['charge']  # error in population-based molecular charge
+    #dfMulcharge = read_Mulliken_charges(qmout[0])
+    #mullik = dfMulcharge.iloc[-1]['Mulliken']
+    #haveSpin = 'SpinD' in list(mullik)
+    #mullQ = mullik['Charge'].values
+    haveSpin = 'SpinD' in list(dfq)
+    mullQ = dfq['Charge'].values
     # sum charges (and any spin densities) within fragments
     fragments = newGeom.find_fragments(tol=tol)
     fragcharge = np.zeros(nfrag)
     for ifrag in range(nfrag):
         fragcharge[ifrag] = mullQ[fragments[ifrag]].sum()
-    #print('QQQQ {:s} fragment mullQ = '.format(froot), fragcharge)
+        # add a portion of the total error--important for Quantum Espresso
+        fragcharge[ifrag] -= qerr / nfrag
+    print('QQQQ {:s} fragment mullQ = '.format(froot), fragcharge)
     if haveSpin:
         spinD = mullik['SpinD'].values
         fragspin = np.zeros(nfrag)
@@ -1951,7 +2015,7 @@ def spread_opt(ips_input, fileroot, dist=10., IDno=None):
         if haveSpin:
             frag_input['spinmult'] = np.around(fragspin[ifrag]).astype(int) + 1
         froot = '{:s}_frag{:d}'.format(fileroot, ifrag)
-        Efrag[ifrag], optfrag[ifrag], IDx = qm_function(frag_input, 'minimize', verbose=False, fileroot=froot)
+        Efrag[ifrag], optfrag[ifrag], IDx = qm_function(frag_input, 'minimize', fileroot=froot)
         # store charge and spin multiplicity in the Geometry() object
         optfrag[ifrag].charge = frag_input['charge']
         optfrag[ifrag].spinmult = frag_input['spinmult']

@@ -71,7 +71,7 @@ coord_unit: angstrom
 # stretching tolerance for calling two atoms bonded
 bondtol: 1.3
 
-# distance threshold for calling system dissociated
+# distance of separation for calling system dissociated
 # zero value means to ignore dissociation
 dissociated: 0.
 
@@ -84,6 +84,11 @@ pbc:
     # only simple cubic lattice is available
     edge:
         unit: ang
+
+# during initial trajectory analysis, how far to separate fragments
+spread_dist:
+    value: 10
+    unit: ang
 
 # options for all known quantum chemistry codes
 # User's input file implicitly applies only to the
@@ -98,7 +103,7 @@ code_options:
         control:
             calculation: scf
             restart_mode: from_scratch
-            tprnfor: True
+            tprnfor: False
             forc_conv_thr: 1.0D-3
             outdir: /wrk/irikura/qe
             pseudo_dir: /home/irikura/qe_6.2.1/pseudo/
@@ -114,8 +119,16 @@ code_options:
             conv_thr: 1.0D-6
             mixing_beta: 0.5
         k_points: gamma
-        # default pseudopotential files <element symbol>.<'pseudo'>
+        # default pseudopotential files <element symbol>.<'basis'>
         basis: pz-hgh.UPF
+        # options for projwfc.x
+        projwfc:
+            ngauss: 0
+            degauss: 0.
+            emin: -35.
+            emax: 0.
+            deltae: 0.005
+            outdir: /wrk/irikura/qe
     # the option 'command' is for a list of strings that are to be added
     #   directly to the quantum code's command line without change
     #   example below (for Gaussian09)

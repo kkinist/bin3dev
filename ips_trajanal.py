@@ -21,8 +21,8 @@ import scipy.signal as scignal
 """
 ##
 class BeadString(object):
-    # Economical representation of a sequence of Geometry objects,
-    #   with additional information (e.g., "energy" gradients)
+    # A sequence of Geometry objects, with additional information
+    #   (e.g., "energy" gradients)
     def __init__(self, Geom, Xmat=None, Evec=None, Gmat=None):
         # 'Geom'    : Geometry() object
         # 'Xmat'    : array of coordinate vectors that define the structures (one per row)
@@ -360,19 +360,29 @@ def optimize_one(ips_input, newgeom, label, froot, frag_sep=0):
         else:
             # it's already a Geometry()
             newG = newgeom.copy()
-        newG.spread_fragments(dist=frag_sep)  # might need to activate 'tol' parameter in the future
+        nfrag = newG.spread_fragments(dist=frag_sep)  # might need to activate 'tol' parameter in the future
         ips_input['coordtype'] = 'cartesian'
         ips_input['cartesian'] = newG
+        if (nfrag > 1) and ips_input['pbc']['use_pbc']:
+            edge = ips_input['pbc']['edge']['value']
+            newedge = edge + frag_sep
+            ips_input['pbc']['edge']['value'] = newedge
+            if ips_input['verbose']:
+                print('Temporarily increasing cell size to ' + 
+                    '{:.2f} to allow for frag_sep = {:.2f}'.format(newedge, frag_sep))
     else:
         # no fragment detection
         ips_input[ips_input['coordtype']] = newgeom
     #ips_input['spinmult'] = guess_spinmult(ips_input, newgeom)
-    E, Struct, IDx = qm_function(ips_input, 'minimize', verbose=False, ID=label, fileroot=froot)
+    E, Struct, IDx = qm_function(ips_input, 'minimize', ID=label, fileroot=froot)
     Erel = au_kjmol * (E - ips_input['E0'])
     if np.isnan(E):
         print('Geometry optimization failed for label = ', label)
     else:
         print('Erel = {:.1f} kJ/mol after geometry optimization for label = '.format(Erel), label)
+    if (nfrag > 1) and ips_input['pbc']['use_pbc'] and (frag_sep > 0):
+        ips_input['pbc']['edge']['value'] = edge
+        print('Cell size returned to {:.2f}'.format(edge))
     return E, Erel, Struct, label
 ##
 def optimize_parallel(ips_input, labels, geoms, frag_sep=0):
@@ -394,7 +404,7 @@ def optimize_parallel(ips_input, labels, geoms, frag_sep=0):
         partasks.append( (ips_input.copy(), geoms[i], labels[i][0], fileroot, frag_sep) )
     pool = multiprocessing.Pool(nprocs)
     print('Optimizing {:d} structures using {:d} processes.'.format(len(labels), min(len(labels), nprocs)))
-    print('\tApparent fragments are spread apart by distance {:.1f} before minimization.'.format(frag_sep))
+    #print('\tApparent fragments are spread apart by distance {:.1f} before minimization.'.format(frag_sep))
     results = [pool.apply_async(optimize_one, t) for t in partasks]
     pool.close()
     pool.join()
@@ -1632,20 +1642,20 @@ def extract_string_peak(dfbeads, nsigma=4):
             ulim = min(nbead0-1, ulim + xs)
     return dfbeads.iloc[llim:ulim+1]
 ##
-## MAIN program
+## MAIN PROGRAM
 ##
 try:
     # read the IPS input file
     input_file = sys.argv[1]
     if not os.path.isfile(input_file):
         # maybe user did not include the file suffix
-        input_file += '.ips'
+        input_file += '.yml'
     print('Reading input file "{:s}"'.format(input_file))
-    ips_input = read_input(input_file)
-    ips_input = parse_input(ips_input)
+    ips_input = read_yinput(input_file, DEFAULT_CONFIG_FILE)
+    ips_input = parse_yinput(ips_input)
     print_dict(ips_input)
-except:
-    print('*** Failure reading input file')
+except Exception as ex:
+    print(ex)
     sys.exit('Usage: ips_trajanal.py <name of IPS input file> <commands>')
 # parameter for deciding whether atoms are 'bonded'
 bondtol = ips_input['bondtol']
@@ -1786,7 +1796,7 @@ try:
     print('See files "{:s}_<walker>_<step>_frag<n>.xyz" for their structures.'.format(molec))
 except:
     print('For incipient fragmentation reactions, optimizing separated fragments.')
-    spread_dist = 10.  # angstrom
+    #spread_dist = ips_input['spread_dist']['value']
     # make DataFrame of fragments and corresponding supermolecules
     dffrag = pd.DataFrame(columns=('Isomer', 'Label', 'Erel', 'Eabs', 'Fragments', 'Supermol'))
     # parallel computation
@@ -1799,7 +1809,7 @@ except:
             frag_input = ips_input.copy()
             frag_input[coordtype] = dfuniq.loc[i]['Struct']
             froot = '{:s}_{:d}_{:d}'.format(ips_input['molecule'], lbl[0], lbl[1])
-            partasks.append( (frag_input.copy(), froot, spread_dist, i) )
+            partasks.append( (frag_input.copy(), froot, i) )
         pool = multiprocessing.Pool(ips_input['nprocs'])
         results = [pool.apply_async(spread_opt, t) for t in partasks]
         pool.close()
@@ -1843,6 +1853,8 @@ try:
     print('{:d} optimized isomers read from file {:s}'.format(nminim, fpkl))
     print('See files "{:s}_minim_<walker>_<step>.xyz" for their structures.'.format(molec))
 except:
+    if ips_input['verbose']:
+        print('Refining geometries of apparent reaction products')
     frag_sep = 5.  # to inhibit undesired rebonding during geometry optimization
     if __name__ == '__main__':
         dfminim = optimize_parallel(ips_input, dfuniq['Found'].tolist()[1:].copy(), dfuniq['Struct'].tolist()[1:].copy(), frag_sep)

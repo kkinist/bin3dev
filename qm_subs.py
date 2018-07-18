@@ -8,13 +8,106 @@ import pandas as pd
 import numpy as np
 from chem_subs import *
 ##
+def run_qm_job(code, inlist, outlist=None):
+    #   *** THIS ROUTINE MUST BE TAILORED TO YOUR COMPUTER SYSTEM ***
+    #   * change the *CMD commands below so that they work on your machine
+    #
+    # Run one quantum chemistry calculation
+    #   'code':    QM code to run (string or list of strings)
+    #   'infile':  input file(s) (string or list of strings)
+    #   'outlist': output file(s) (string or list of strings)
+    #              will be created if not supplied 
+    #
+    G09_CMD = 'g09'
+    QE_PW_CMD = 'pw.x'
+    QE_PROJWFC_CMD = 'projwfc.x'
+    #
+    code = conv_list_scalar(code, 'list') # make it a list
+    inlist = conv_list_scalar(inlist, 'list')
+    # create name of primary output file, if it was not provided as outlist[0]
+    if outlist is None:
+        # output file name(s) not provided
+        outlist = [ supply_qm_filename_suffix(code[0], \
+            os.path.splitext(inlist[0])[0], 'output') ]
+    outlist = conv_list_scalar(outlist, 'list')
+    FDin = open(inlist[0], 'r')
+    FDout = open(outlist[0], 'w')
+    if code[0] == 'gaussian09':
+        # if a checkpoint file is used, append it to the list of 
+        #   output files
+        chkfile = ''
+        regxchk = re.compile(r'%chk=(\S+)', re.IGNORECASE)
+        with open(inlist[0]) as f:
+            for line in f:
+                m = regxchk.match(line)
+                if m:
+                    chkfile = m.group(1)
+                    # a checkpoint file is specified; add it to the list of output file
+                    outlist.append(chkfile)
+        # run the calculation and wait for it to complete
+        rcode = subprocess.call([G09_CMD], stdin=FDin, stdout=FDout, stderr=FDout)
+    elif code[0] == 'quantum-espresso':
+        # run the specific code specified by code[1]
+        if len(code) < 2:
+            print_err('', 'Must specify module within Quantum Espresso package')
+        if code[1].lower() == 'pw':
+            rcode = subprocess.call([QE_PW_CMD], stdin=FDin, stdout=FDout, stderr=FDout)
+        elif code[1].lower() == 'projwfc':
+            rcode = subprocess.call([QE_PROJWFC_CMD], stdin=FDin, stdout=FDout, stderr=FDout)
+        else:
+            print_err('code', '{:s} within Quantum Espresso package'.format(code[1]))
+    else:
+        print_err('code', str(code))
+    FDin.close()
+    FDout.close()
+    return outlist
+##
+def run_qm_task(code, qminp, task):
+    # invoke run_qm_job() as appropriate
+    #    (maybe more than once)
+    # 'code' and 'qminp' may be lists 
+    # return a list of output files
+    inlist = conv_list_scalar(qminp, 'list')
+    outlist = []
+    code = assign_qm_codename(code, task)
+    if len(inlist) == 1:
+        # only one calculation to run
+        outlist = run_qm_job(code, inlist[0])
+    else:
+        njob = len(inlist)
+        for ijob in range(njob):
+            # two-name code specification
+            code2 = [code[0], code[ijob+1]]
+            qmout = run_qm_job(code2, inlist[ijob])
+            outlist.extend(qmout)
+    return outlist
+##
+def assign_qm_codename(code, task='energy'):
+    # 'code': string naming QM package
+    # 'task': calculation type 
+    # return a list with 'code' as the first element and any added elements
+    #   specifying code(s) within the QM package
+    if code == 'gaussian09':
+        # there is only one invocation
+        return [code]
+    elif code == 'quantum-espresso':
+        if task in ['minimize', 'gradient', 'force', 'energy']:
+            return [code, 'PW']
+        elif task == 'charges':
+            return [code, 'PW', 'PROJWFC']
+        else:
+            # the requested task is not recognized
+            print_err('task', task)
+    else:
+        print_err('code', code)
+##
 def identify_qm_code_out(outfile):
     # return a list of the name of the quantum code and any version info
     # codes recognized: 'gaussian09', 'quantum-espresso'
     regx_g09 = re.compile(' Gaussian 09:\s+\S+Rev([A-Z]\.\d+)\s+(\d+-\w+-\d+)')
     regx_qe = re.compile('This program is part of the open-source ' +
         'Quantum ESPRESSO suite')
-    regx_qe_pw = re.compile('Program PWSCF v\.(\d+\.\d+) starts on')
+    regx_qe_module = re.compile('\s+Program ([A-Z]+)\s+v\.(\d+\.\d+) starts on')
     code = []
     with open(outfile) as fout:
         for line in fout:
@@ -23,53 +116,15 @@ def identify_qm_code_out(outfile):
             if m:
                 return(['gaussian09', m.group(1), m.group(2)])
             # check for quantum-espresso and component codes
-            m = regx_qe_pw.search(line)
+            m = regx_qe_module.match(line)
             if m:
-                code.extend(['pwscf', m.group(1)])
+                code.extend([m.group(1), m.group(2)])
             if regx_qe.search(line):
                 code.insert(0, 'quantum-espresso')
                 # this line appears after the 'PWSCF' line
                 return(code)                
     # failure
     return False
-def run_qm_job(code, infile, outlist=None):
-    #   *** THIS ROUTINE MUST BE TAILORED TO YOUR COMPUTER SYSTEM ***
-    # run a quantum chemistry calculation; return the name(s) of output file(s)
-    #   'infile' is the name of the input file
-    #   outlist[] are names of output files and will be created if not
-    #      supplied as arguments
-    #
-    # create name of primary output file, if it was not provided as outlist[0]
-    if outlist is None:
-        # it was not provided
-        froot = os.path.splitext(infile)[0]  # 'infile' without filename suffix
-        outlist = [ supply_qm_filename_suffix(code, froot, 'output') ]
-    FDin = open(infile, 'r')
-    FDout = open(outlist[0], 'w')
-    if code == 'gaussian09':
-        # if a checkpoint file is used, append it to the list of 
-        #   output files
-        chkfile = ''
-        regxchk = re.compile(r'%chk=(\S+)', re.IGNORECASE)
-        with open(infile) as f:
-            for line in f:
-                m = regxchk.match(line)
-                if m:
-                    chkfile = m.group(1)
-                    # a checkpoint file is specified; add it to the list of output file
-                    outlist.append(chkfile)
-        # run the calculation and wait for it to complete
-        rcode = subprocess.call(['g09'], stdin=FDin, stdout=FDout, stderr=FDout) # TAILORED TO gamba.nist.gov
-        return outlist
-    elif code == 'quantum-espresso':
-        # run the calculation and wait for it to complete
-        rcode = subprocess.call(['pw.x'], stdin=FDin, stdout=FDout, stderr=FDout) # TAILORED TO gamba.nist.gov
-        return outlist
-    else:
-        print_err('code', code)
-    close(FDin)
-    close(FDout)
-    return outlist
 ##
 def read_qm_ZMgradient(code, qmoutfile, ZM, nlines=False):
     # Read energy gradient expressed in z-matrix coordinates
@@ -194,18 +249,22 @@ def read_qm_gradient(code, qmoutfile, nlines=False):
     else:
         return grads
 ##
-def qm_calculation_success(code, task, qmoutfile):
+def qm_calculation_failure(codename, task, outlist):
     # Did quantum chemistry calculation succeed at 'task'?
-    # return True or False
+    # return 0 for success, else return the number of the bad output file (usually 1)
     # task options: 'minimize', 'gradient', 'energy'
+    code = conv_list_scalar(codename, 'string')
+    qmoutfile = conv_list_scalar(outlist, 'string')
     if code == 'gaussian09':
         regxOpt = re.compile(r'\s*Optimization completed\.')
         regxForce = re.compile(r'\s*Maximum Force\s+\d+\.\d+')
         regxSCF = re.compile(r'\s*SCF Done:\s+E\(')
+        # scan only one output file for Gaussian09
     elif code == 'quantum-espresso':
         regxOpt = re.compile(r'\s*End of BFGS Geometry Optimization')
         regxForce = re.compile(r'\s*Forces acting on atoms \(cartesian axes, Ry/au\):')
         regxSCF = re.compile(r'\s*End of self-consistent calculation')
+        regxCharge = re.compile(r'Lowdin Charges:')
     else:
         print_err('code', code)
     if task == 'minimize':
@@ -214,14 +273,31 @@ def qm_calculation_success(code, task, qmoutfile):
     elif task == 'gradient':
         # ordinary energy gradient
         regx = regxForce
-    elif task == 'energy':
+    elif task in ['energy', 'charges']:
         # ordinary SCF energy
         regx = regxSCF
+    success = False
     with open(qmoutfile) as f:
         for line in f:
             if regx.match(line):
-                return True
-    return False
+                success = True
+                break
+    if not success:
+        # failed already
+        return 1
+    if (code == 'quantum-espresso') and (task == 'charges'):
+        # there is a second output file to scan
+        success = False
+        with open(outlist[1], 'r') as f:
+            for line in f:
+                if regxCharge.match(line):
+                    success = True
+                    break
+        if success:
+            return 0
+        else:
+            return 2
+    return 0
 ##
 def read_qm_ZMatrix(code, qmoutfile, nline=False, unitR='angstrom'):
     # Read internal coordinates from quantum chemistry output file
@@ -287,11 +363,12 @@ def read_qm_ZMatrix(code, qmoutfile, nline=False, unitR='angstrom'):
     else:
         return geoms
 ##
-def read_qm_Geometry(code, qmoutfile, nline=False, units='angstrom'):
+def read_qm_Geometry(codename, qmoutfile, nline=False, units='angstrom'):
     # Read atomic coordinates from quantum chemistry output file
     # Return a list of Geometry objects
     # If nline is True, also return a list of the corresponding
     #   line numbers. 
+    code = conv_list_scalar(codename, 'string')
     if code == 'gaussian09':
         regxStart = re.compile(r'\s+(Standard|Input) orientation:')
         regxEnd = re.compile(r'-{60}')
@@ -492,9 +569,10 @@ def format_qm_coordinates(code, crds, intype='auto'):
         print_err('code', code)
     return coord 
 ##
-def qm_diagnose(code, task, qmoutfile):
+def qm_diagnose(codename, task, qmoutfile):
     # Figure out what went wrong with a failed QM calculation
     problem = 'unidentified problem with task "{:s}'.format(task)
+    code = conv_list_scalar(codename, 'string')
     if code == 'gaussian09':
         if task == 'minimize':
             # Was there a coordinate failure?
@@ -533,6 +611,229 @@ def qm_diagnose(code, task, qmoutfile):
         print_err('code', code)
     print('******* nstep = {}, niter = {}'.format(nstep, niter))
     return problem
+##
+def read_Znuc(fname):
+    # return a pandas DataFrame with one row per atom:
+    #    element symbol, Z, and Zeff
+    # If multiple blocks are in the file, only read the first one
+    code = identify_qm_code_out(fname)
+    Z = []
+    Zeff = []
+    symb = []
+    if code[0] == 'gaussian09':
+        df = read_g09_Znuc(fname)
+        return df
+    elif code[0] == 'quantum-espresso':
+        # Zeff values are listed by element; atoms are listed 
+        #   individually in a different place
+        regxStart = re.compile(r'atomic species   valence    mass     pseudopotential')
+        regxEnd = re.compile(r'^\s*$')
+        # columns are: symbol, valence, mass, and PP info
+        # only want columns 1 and 2
+        # each element is listed once, regardless of the number of instances
+        #   within the molecule
+        regx = re.compile(r'\s+([A-Z][a-z]?)\s+(\d+)\.00\s+(?:\d+\.\d+)')
+        inblock = False
+        nval = {}
+        # also must find table of individual atoms
+        regxAStart = re.compile(r'\s+site n\.\s+atom\s+positions')
+        regxA = re.compile(r'\s+(?:\d+)\s+([A-Z][a-z]?)\s+tau')
+        inA = False
+        with open(fname) as f:
+            for line in f:
+                if inblock:
+                    m = regx.match(line)
+                    if m:
+                        nval[m.group(1)] = int(m.group(2))
+                    if regxEnd.match(line):
+                        inblock = False
+                        continue
+                if regxStart.search(line):
+                    if len(nval) == 0:
+                        inblock = True
+                    else:
+                        # ignore all but first block
+                        continue
+                if inA:
+                    m = regxA.match(line)
+                    if m:
+                        symb.append(m.group(1))
+                    if regxEnd.match(line):
+                        inA = False
+                        continue
+                if regxAStart.match(line):
+                    if len(symb) == 0:
+                        inA = True
+                    else:
+                        # ignore all but first block
+                        continue
+        for el in symb:
+            Z.append(elz(el, 'Z'))
+            Zeff.append(nval[el])
+        data = {'Elem': pd.Series(symb),
+                'Z'   : pd.Series(Z),
+                'Zeff': pd.Series(Zeff)}
+        df = pd.DataFrame(data)
+        return df[['Elem', 'Z', 'Zeff']]
+    else:
+        print_err('code', code)
+    return None
+##
+def read_g09_Znuc(fname):
+    # return a pandas DataFrame with one row per atom:
+    #    element symbol, Z, and Zeff
+    # If multiple blocks are in the file, only read the first one
+    Z = []
+    Zeff = []
+    symb = []
+    # Z values are in one or two places
+    regxZStart = re.compile(r'(Input|Standard) orientation:')
+    regxZEnd = re.compile(r'------------------------')
+    endZcount = 3  # number of lines that must match regxEnd 
+    # columns in g09 output: center no., atomic no., atomic type,
+    #   x, y, z coordinates; ignore all but column 2
+    s = r'\s+(?:\d+)\s+(\d+)\s+(?:\d+)' + r'\s+(?:-?\d+\.\d+)' * 3
+    regxZ = re.compile(s)
+    inZ = False
+    # pseudopotential info (if any) is elsewhere
+    regxPPStart = re.compile(r'\s+Pseudopotential Parameters')
+    regxPPEnd = re.compile(r'================')
+    endPPcount = 3
+    # only PP atoms have more than two columns
+    # first three columns: center no., atomic no., [val. electrons]
+    regxPP = re.compile(r'\s+(?:\d+)\s+(\d+)\s*(\d+)?$')
+    inPP = False
+    nval = {}  # number of explicit electrons
+    # search the file
+    with open(fname) as f:
+        for line in f:
+            # look for Z data
+            if inZ:
+                if regxZEnd.search(line):
+                    endZcount -= 1
+                if endZcount < 1:
+                    # done reading Z data
+                    inZ = False
+                    continue
+                m = regxZ.search(line)
+                if m:
+                    zval = int(m.group(1))
+                    Z.append(zval)
+                    symb.append(elz(zval, 'symbol'))
+            if regxZStart.search(line):
+                if len(Z) > 0:
+                    # already have data; ignore subsequent blocks
+                    continue
+                else:
+                    # prepare to read block
+                    inZ = True
+            # look for PP data
+            if inPP:
+                if regxPPEnd.search(line):
+                    endPPcount -= 1
+                if endPPcount < 1:
+                    # done reading PP data
+                    inPP = False
+                    continue
+                m = regxPP.match(line)
+                if m:
+                    zval = int(m.group(1))
+                    if m.group(2) is None:
+                        # no PP on this element
+                        nval[zval] = zval
+                    else:
+                        nval[zval] = int(m.group(2))
+            if regxPPStart.match(line):
+                if len(nval) > 0:
+                    # ignore all but first block
+                    continue
+                else:
+                    # prepare to read block
+                    inPP = True
+    # transfer nval data to Zeff[]
+    for zval in Z:
+        if zval in nval:
+            Zeff.append(nval[zval])
+        else:
+            Zeff.append(zval)
+    data = {'Elem': pd.Series(symb),
+            'Z'   : pd.Series(Z),
+            'Zeff': pd.Series(Zeff)}
+    df = pd.DataFrame(data)
+    return df[['Elem', 'Z', 'Zeff']]
+##
+def read_atomic_charges(fnames):
+    # read atomic charges from minimum number of output files
+    # return charge type ('Mulliken' or 'Lowdin') and a pandas
+    #   DataFrame with a row for each atom
+    fname = conv_list_scalar(fnames, 'string')
+    code = identify_qm_code_out(fname)
+    if code[0] == 'gaussian09':
+        # Gaussian09 prints net atomic charges
+        df = read_Mulliken_charges(fname)['Mulliken'].iloc[-1]
+        return df, 'Mulliken'
+    elif code[0] == 'quantum-espresso':
+        # Quantum Espresso (projwfc.x) prints electron populations, not charges
+        if (type(fnames) is not list) or (len(fnames) != 2):
+            print_err('', 'need two output files: from pw.x and from projwc.x')
+        dfZ = read_Znuc(fnames[0])
+        dfq, qtype = read_atomic_pops(fnames[1])
+        if (dfZ is None) or (dfq is None):
+            return None, None
+        elems = dfZ['Elem'].values
+        charges = dfq['Pop'].values - dfZ['Zeff'].values
+        data = {'Element': elems, 'Charge': charges}
+        df = pd.DataFrame(data)
+        return df[['Element', 'Charge']], qtype
+    else:
+        print_err('code', code)
+##
+def read_atomic_pops(fname):
+    # read atomic electron populations from minimum number of output files
+    # return charge type ('Mulliken' or 'Lowdin') and a pandas
+    #   DataFrame with a row for each atom
+    code = identify_qm_code_out(fname)
+    if code[0] == 'gaussian09':
+        # Gaussian09 prints net atomic charges, not populations
+        dfq = read_Mulliken_charges(fname)['Mulliken'].iloc[-1]
+        dfz = read_g09_Znuc(fname)
+        data = {'Element': dfq['Element'].values,
+                'Pop'    : dfz['Zeff'].values + dfq['Charge'].values}
+        df = pd.DataFrame(data)
+        return df[['Element', 'Pop']], 'Mulliken'
+    elif code[0] == 'quantum-espresso':
+        # Quantum Espresso (projwfc.x) prints electron populations
+        regxStart = re.compile(r'Lowdin Charges:')
+        regxEnd = re.compile(r'Spilling Parameter:\s+(-?\d+\.\d+)')
+        regxQ = re.compile(r'Atom #\s+(\d+): total charge =\s+(-?\d+\.\d+),')
+        inQ = False
+        with open(fname) as f:
+            for line in f:
+                if inQ:
+                    if regxEnd.search(line):
+                        inQ = False
+                    m = regxQ.search(line)
+                    if m:
+                        anum = int(m.group(1))
+                        q = float(m.group(2))
+                        if anum not in atno:
+                            atno.append(anum)
+                            epop.append(q)
+                else:
+                    if regxStart.search(line):
+                        # initialize lists
+                        atno = []
+                        epop = []
+                        inQ = True
+        try:
+            data = {'Atom#': atno, 'Pop': epop}
+            df = pd.DataFrame(data)
+            return df[['Atom#', 'Pop']], 'Lowdin'
+        except:
+            # probably no data in this file
+            return None, None
+    else:
+        print_err('code', code)
 ##
 def read_Mulliken_charges(fname, sumH=False):
     ## only for Gaussian09 ##
@@ -692,10 +993,15 @@ def parse_g09_archive_block(arch):
         return retval
     else:
         # convert to a square matrix
-        iu = np.triu_indices(ndof)
+        il = np.tril_indices(ndof)
         mat = np.zeros((ndof, ndof))
-        mat[iu] = fc
-        hess = np.tril(mat.T, -1) + mat
+        mat[il] = fc
+        utri = np.tril(mat, -1).T
+        hess = mat + utri
+        #iu = np.triu_indices(ndof)
+        #mat = np.zeros((ndof, ndof))
+        #mat[iu] = fc
+        #hess = np.tril(mat.T, -1) + mat
         retval['hessian'] = hess
     i += 1
     # expect nuclear gradient next

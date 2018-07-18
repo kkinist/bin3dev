@@ -8,7 +8,6 @@ import sys, os
 from chem_subs import *
 from qm_subs import *
 from ips_subs import *
-DEFAULT_CONFIG_FILE = 'ips_defaults.yml'
 #
 if len(sys.argv) < 2:
     sys.exit('\tUsage: ips.py <name of IPS input file>')
@@ -82,11 +81,13 @@ if not ips_input['continuation']:
 else:
     # this is continuing from where a previous calculations stopped
     # read reference geometry and walkers[] from the pickle file
-    walkers, ips_input = restore_pickle(ips_input)
-    print('&&&&& input as restored from file:')
+    walkers, old_input = restore_pickle(ips_input)
+    #print('&&&&& old input from pickle file:')
+    #print_dict(old_input)
+    #E0 = ips_input['E0']
+    #E0_geom = ips_input['E0_geom']
+    print('Input data after merging new input with old (from file):')
     print_dict(ips_input)
-    E0 = ips_input['E0']
-    E0_geom = ips_input['E0_geom']
     print('Read data for {:d} walkers covering most recent {:d} steps'.format(len(walkers), len(walkers[0].historyE)))
 #
 if (coordtype == 'zmatrix'):

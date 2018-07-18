@@ -25,6 +25,7 @@ ev_wavenumber = au_wavenumber / eV_per_hartree      # eV expressed in cm**-1
 #
 AVOGADRO = 6.02214129e23 # Avogadro constant
 PLANCK = 6.62606957e-34  # Planck constant (h) in J.s
+HBAR = PLANCK / (2 * np.pi) 
 CLIGHT = 299792458.     # speed of light (c)in m/s
 BOLTZMANN = 1.38064852e-23  # Boltzmann constant (k) in J/K
 RGAS = AVOGADRO * BOLTZMANN # in J / mol.K
@@ -1246,7 +1247,7 @@ class Geometry(object):
         except:
             # 'mlist' is a string
             for i in range(self.natom()):
-                self.atom[i].set_mass(mllist)
+                self.atom[i].set_mass(mlist)
         return
     def translate(self, vector):
         # given a 3-vector, translate all atoms
@@ -1262,7 +1263,13 @@ class Geometry(object):
         moment, axes = np.linalg.eigh( imat )
         # convert moment to kg.m^2, assuming distances in angstrom and masses in u
         moment /= 1.0e20 * AVOGADRO * 1000.0
-        rotconst = PLANCK / ( 8 * np.pi * np.pi * CLIGHT * moment )   # now in units (1/m)
+        convt = PLANCK / ( 8 * np.pi * np.pi * CLIGHT )
+        # compute rotational constants, allowing for zero moments
+        rotconst = np.zeros_like(moment) + np.inf
+        for i in range(len(moment)):
+            if moment[i] > 0:
+                rotconst[i] = convt / moment[i]
+        #rotconst = PLANCK / ( 8 * np.pi * np.pi * CLIGHT * moment )   # now in units (1/m)
         rotconst *= CLIGHT * 1.0e-9      # now in GHZ
         return rotconst, moment, axes        
     def center(self, origin=np.zeros(3), use_masses=True):
@@ -2687,6 +2694,8 @@ def average_structure(Struct1, Struct2, weight1=0.5, weight2=0.5):
 ##
 def print_dict(nestdict, indent=0, space='    '):
     # nice printing of nested dict
+    if not isinstance(nestdict, dict):
+        print_err('', 'non-dict argument', halt=False)
     spacing = space * indent
     for k in sorted(nestdict):
         if isinstance(nestdict[k], dict):
@@ -2728,6 +2737,29 @@ def backfill_dict(defaults, userinput):
         else:
             userinput[key] = defaults[key]
     return True
+##
+def conv_list_scalar(name, ret_type=None):
+    # convert a scalar to a list of scalar, OR
+    # return the first element of the list
+    if ret_type == 'list':
+        # return a list
+        if type(name) is list:
+            return name
+        else:
+            return [name]
+    elif ret_type == 'string':
+        if type(name) is list:
+            return name[0]
+        else:
+            return name
+    elif ret_type is None:
+        # toggle: return the other thing
+        if type(name) is list:
+            return name[0]
+        else:
+            return [name]
+    else:
+        print_err('', 'unrecognized ret_type = {}'.format(ret_type))
 ##
 getframe_expr = 'sys._getframe({}).f_code.co_name'
 def print_err(errtype, details='', halt=True):
