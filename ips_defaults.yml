@@ -110,6 +110,7 @@ code_options:
             nstep: 100
         system:
             ibrav: 1
+            assume_isolated: makov-payne
             ecutwfc: 25
             ecutrho: 200
             nosym: True
