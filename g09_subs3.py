@@ -404,11 +404,13 @@ def read_g09_rotational(fhandl):
     fhandl.seek(byte_start) # restore file pointer to original position
     return df
 ##
-def read_g09_scfe(fhandl):
+def read_g09_scfe(fhandl, onevalue=False):
     # read all SCF energies and return a DataFrame:
     #   (1) line number(s), (2) byte number(s),
     #   (3) name of SCF method, (4) number of SCF cycles,
     #   (5) SCF energy (hartree)
+    # If onevalue==True, just return the first SCF energy 
+    #   found, as a single float
     byte_start = fhandl.tell()
     fhandl.seek(0)  # rewind file
     energy = []
@@ -432,19 +434,30 @@ def read_g09_scfe(fhandl):
             # extract the energy value and the number of scf cycles
             fields = line.split()
             ncycle.append(int(fields[-2]))
-            energy.append(float(fields[-5]))
+            escalar = float(fields[-5])
+            if onevalue:
+                # all done
+                return escalar
+            energy.append(escalar)
     data = list(zip(fline, fpos, method, ncycle, energy))
     cols = ['line', 'byte', 'Method', 'Cycles', 'Energy']
     df = pd.DataFrame(data=data, columns=cols)
     fhandl.seek(byte_start) # restore file pointer to original position
     return df
 ##
-def read_g09_postHF(fhandl):
+def read_g09_postHF(fhandl, onevalue=''):
     # read all HF and post-HF energies and return a DataFrame:
     #   (1) line number(s), (2) byte number(s),
     #   (3) method name, (4) energy,
     #   repeat #3 and #4 as needed for different post-HF energies
     # Handles (so far): HF, MP2, MP3, CCSD, CCSD(T)
+    # If onevalue is an energy type, return the first value of that
+    #   energy as a single float
+    if onevalue.upper() in ['HF', 'MP2', 'MP3', 'CCSD', 'CCSD(T)']:
+        onevalue = onevalue.upper()
+    else:
+        # return the full DataFrame
+        onevalue = False
     byte_start = fhandl.tell()
     fhandl.seek(0)  # rewind file
     energy = []
@@ -472,28 +485,41 @@ def read_g09_postHF(fhandl):
             fline.append(lineno)
             fpos.append(fhandl.tell())
             method.append(m.group(1))
-            energy.append(float(m.group(2)))
+            nrg = float(m.group(2))
+            if onevalue == 'HF':
+                # all done
+                return nrg
+            energy.append(nrg)
         m = regmp2.search(line)
         if m:
             # MP2 energy; save it
             fline.append(lineno)
             fpos.append(fhandl.tell())
             method.append('MP2')
-            energy.append(float(m.group(1).replace('D','E')))
+            nrg = float(m.group(1).replace('D','E'))
+            if onevalue == 'MP2':
+                return nrg
+            energy.append(nrg)
         m = regmp3.search(line)
         if m:
             # MP3 energy; save it
             fline.append(lineno)
             fpos.append(fhandl.tell())
             method.append('MP3')
-            energy.append(float(m.group(1).replace('D','E')))
+            nrg = float(m.group(1).replace('D','E'))
+            if onevalue == 'MP3':
+                return nrg
+            energy.append(nrg)
         m = regccsdt.search(line)
         if m:
             # CCSD(T) energy; save it
             fline.append(lineno)
             fpos.append(fhandl.tell())
             method.append('CCSD(T)')
-            energy.append(float(m.group(1).replace('D','E')))
+            nrg = float(m.group(1).replace('D','E'))
+            if onevalue == 'CCSD(T)':
+                return nrg
+            energy.append(nrg)
         m = regccsd.search(line)
         if m:
             # CCSD energy; remember it but don't save it yet
@@ -504,6 +530,8 @@ def read_g09_postHF(fhandl):
             fline.append(ccsd_mem[0])
             fpos.append(ccsd_mem[1])
             method.append('CCSD')
+            if onevalue == 'CCSD':
+                return ccsd_mem[2]
             energy.append(ccsd_mem[2])
     data = list(zip(fline, fpos, method, energy))
     cols = ['line', 'byte', 'Method', 'Energy']
@@ -1146,7 +1174,20 @@ def read_g09_oeke(fhandl, virtual=False):
         table['Spin'] = 'both'
     return table
 ##
-def read_g09_ept(fhandl):
+def spin_label(orbnum, spinname):
+    # combine orbital number and spin name into a short string
+    # e.g., '6' and 'alpha' produce '6a'
+    return '{:d}{:s}'.format(orbnum, spinname[0])
+##
+def top_off(listvar, length, value=0., fill_all=False):
+    # append values (= 'value') to listvar until its length == 'length'
+    # if fill_all==False, don't do anything if listvar is empty 
+    if len(listvar) or fill_all:
+        while (len(listvar) < length):
+            listvar.append(value)
+    return listvar
+##
+def read_g09_ept(fhandl, spinlabel=False, flipsign=False):
     # Read correlated orbital energies from electron propagator calculation.
     #   Gaussian keyword: EPT(OVGF+P3)
     # Only read the first set of such data in the target file.
@@ -1168,7 +1209,10 @@ def read_g09_ept(fhandl):
     #  (13) P3 second-order pole strength,
     #  (14) P3 third-order energy,
     #  (15) P3 third-order pole strength.
-    #
+    # If spinlable==True, combine the orbital number and the spin into a single
+    #   label (e.g., 1a, 2a, 3b)
+    # If flipsign==True, reverse the signs to correspond to ionization 
+    #   (instead of recombination) or detachment (instead of attachment)
     byte_start = fhandl.tell()
     fhandl.seek(0)  # rewind file
     lineno = 0
@@ -1344,6 +1388,28 @@ def read_g09_ept(fhandl):
                         p33ps.append(float(m.group(2)))
                         continue
                 # get here if we ran out of data in a data block
+                # fill any missing data with zeros
+                nline = max(len(oline), len(pline))
+                top_off(oline, nline)
+                top_off(opos, nline)
+                top_off(oorb, nline)
+                top_off(ospin, nline)
+                top_off(okoop, nline)
+                top_off(ovgf2, nline)
+                top_off(ovgf2ps, nline)
+                top_off(ovgf3, nline)
+                top_off(ovgf3ps, nline)
+                top_off(ovgf, nline)
+                top_off(ovgfps, nline)
+                top_off(pline, nline)
+                top_off(ppos, nline)
+                top_off(porb, nline)
+                top_off(pspin, nline)
+                top_off(pkoop, nline)
+                top_off(p32, nline)
+                top_off(p32ps, nline)
+                top_off(p33, nline)
+                top_off(p33ps, nline)
                 block = ''
     if False:
         print('list lengths:')
@@ -1413,9 +1479,23 @@ def read_g09_ept(fhandl):
         df = df.append(rowFrom, ignore_index=True)
         lastrow = len(df.index) - 1
         df.set_value(lastrow, 'Orbital', degenTo[i])
-    if not (df.Spin == 'beta').any():
-        # this is an RHF case; change spin labels to 'both'
-        df.Spin = 'both'
+    if spinlabel:
+        # combine two columns
+        df['Orbital'] = df.apply(lambda row: spin_label(row['Orbital'], row['Spin']), axis=1)
+        df = df.drop(['Spin'], axis=1)
+    else:
+        if not (df.Spin == 'beta').any():
+            # this is an RHF case; change spin labels to 'both'
+            df.Spin = 'both'
+    if flipsign:
+        # reverse sign of energies
+        for col in ['Koopmans', 'OVGF-2nd', 'OVGF-3rd', 'OVGF', 
+            'P3-2nd', 'P3-3rd']:
+            try:
+                df[col] *= -1
+            except:
+                # probably a missing column
+                pass
     return df
 ##
 def read_best_ept(fhandl, minPS=0.80):

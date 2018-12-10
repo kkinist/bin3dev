@@ -8,20 +8,6 @@ import numpy as np
 import pandas as pd
 from scipy.spatial.distance import cdist
 #
-# don't use the lower-case constants anymore
-amu_au = 1 / 5.4857990946E-4    # amu expressed in a.u. (viz., electron masses)
-amu_kg = 1.660539040e-27        # amu (aka u) expressed in kg
-au_wavenumber = 219474.6313708  # hartree expressed in wavenumbers
-au_joule = 4.35974434E-18       # hartree expressed in joule
-avogadro = 6.02214129e23 # Avogadro constant
-planck = 6.62606957e-34  # Planck constant (h) in J.s
-clight = 299792458.     # speed of light (c)in m/s
-bohr = 0.5291772109     # Bohr radius (a0) in angstrom
-boltzmann = 1.38064852e-23  # Boltzmann constant (k) in J/K
-Rgas = avogadro * boltzmann # in J / mol.K
-eV_per_hartree = 27.21138602  # from NIST website 10/25/2016
-au_kjmol = au_joule * avogadro / 1000   # hartree expressed in kJ/mol
-ev_wavenumber = au_wavenumber / eV_per_hartree      # eV expressed in cm**-1
 #
 AVOGADRO = 6.02214129e23 # Avogadro constant
 PLANCK = 6.62606957e-34  # Planck constant (h) in J.s
@@ -42,6 +28,21 @@ KJMOL_WAVENUMBER = AU_WAVENUMBER / AU_KJMOL  # kJ/mol expressed in cm**-1
 BOHR = 0.5291772109     # Bohr radius (a0) in angstrom
 KCAL_KJ = 4.184  # kcal expressed in kJ
 EV_KJMOL = AU_KJMOL / EV_PER_HARTREE  # eV expressed in kJ/mol
+#
+# don't use the lower-case constants anymore
+amu_au = 1 / 5.4857990946E-4    # amu expressed in a.u. (viz., electron masses)
+amu_kg = 1.660539040e-27        # amu (aka u) expressed in kg
+au_wavenumber = 219474.6313708  # hartree expressed in wavenumbers
+au_joule = 4.35974434E-18       # hartree expressed in joule
+avogadro = 6.02214129e23 # Avogadro constant
+planck = 6.62606957e-34  # Planck constant (h) in J.s
+clight = 299792458.     # speed of light (c)in m/s
+bohr = 0.5291772109     # Bohr radius (a0) in angstrom
+boltzmann = 1.38064852e-23  # Boltzmann constant (k) in J/K
+Rgas = avogadro * boltzmann # in J / mol.K
+eV_per_hartree = 27.21138602  # from NIST website 10/25/2016
+au_kjmol = au_joule * avogadro / 1000   # hartree expressed in kJ/mol
+ev_wavenumber = au_wavenumber / eV_per_hartree      # eV expressed in cm**-1
 #
 def convert_unit(quantity, target_unit):
     # unit conversion; 'quantity' is a dict with 'value' (or 'how_much') and 'unit'
