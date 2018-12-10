@@ -2762,6 +2762,113 @@ def conv_list_scalar(name, ret_type=None):
     else:
         print_err('', 'unrecognized ret_type = {}'.format(ret_type))
 ##
+def FGHcheck(x, y, count, acc=1.0e-6):
+    # for Fourier Grid Hamiltonian calculations
+    # return True if arrays are OK, else False
+    npt = len(x)
+    if len(y) != npt:
+        chem.print_err('', 'x and y have different lengths')
+    if (count == 'odd'):
+        if (npt % 2 == 0):
+            chem.print_err('', 'number of points is even but should be odd')
+    elif (count == 'even'):
+        if (npt % 2 == 1):
+            chem.print_err('', 'number of points is odd but should be even')
+    else:
+        chem.print_err('', "number of points must be 'even' or 'odd', not '{:s}' ".format(str(count)))
+    # check for uniform intervals
+    dx = np.ediff1d(x)
+    ddx = np.ediff1d(dx) / x.max()
+    if not np.allclose(ddx, np.zeros_like(ddx), atol=acc):
+        chem.print_err('', 'distance grid must be uniform to {} relative'.format(acc))
+    return True
+##
+def FGHodd(x, V, mass):
+    # atomic units!
+    # given vectors of distance and energy, and mass,
+    #   return eigenvalues and eigenvectors, sorted by increasing energy
+    # ref: Marston & Balint-Kurti (1989)
+    # eigenvectors are not renormalized using delta-x, so may be very small
+    #   (if they are renormalized that way, they can be very big)
+    if not FGHcheck(x, V, 'odd'):
+        return None
+    dx = x[1] - x[0]
+    N = len(x)
+    n = (N - 1) // 2
+    L = N * dx
+    # build the Hamiltonian
+    H = np.diag(V)
+    T = np.zeros_like(H)
+    c = 2 * np.pi * np.pi / (mass * L * L)
+    pn = 2 * np.pi / N
+    # evaluate cosines in advance to avoid duplication
+    cfunc = np.zeros(N)
+    for dij in range(N):
+        s = 0
+        for l in range(1, n+1):
+            s += np.cos(pn * l * dij) * l * l
+        cfunc[dij] = s
+    for i in range(N):
+        for j in range(i+1):
+            dij = i - j
+            T[i,j] = cfunc[dij]
+    c = c * 2 / N
+    H = H + T * c
+    # only need lower triangle of H
+    vals, vecs = np.linalg.eigh(H)
+    # sort by increasing energy
+    idx = vals.argsort()
+    vals = vals[idx]
+    vecs = vecs[:, idx]
+    return vals, vecs
+##
+def FGHeven(x, V, mass):
+    # FGH method for even number of points
+    # adapted from QCPE #647 (1993) by Gogtas, Balint-Kurti and Marston
+    # Assume everything is in atomic units
+    # This seems slower and less accurate than the "odd" algorithm;
+    #   maybe I have a bug
+    if not FGHcheck(x, V, 'even'):
+        return None
+    N = len(x)
+    L = x[-1] - x[0]
+    c1 = np.pi * np.pi / (mass * L * L)
+    # following line uses N/2, as in the QCPE code comments, in conflict with the 
+    #   actual code ("(N-2)/2")
+    #c2 = c1 * ((N-1)*(N-2)/6 + (N-2)/2)
+    c2 = c1 * ((N-1)*(N-2)/6 + N/2)
+    darg = np.pi / N
+    # construct the Hamiltonian, diagonal first
+    H = np.identity(N) * c2
+    H = H + np.diag(V)
+    # off-diagonal
+    for i in range(N):
+        for j in range(N):
+            dij = i - j
+            if dij == 0:
+                continue
+            sgn = 1 - 2 * (dij % 2)
+            arg = darg * dij
+            sine = np.sin(arg)
+            H[i,j] = sgn * c1 / (sine * sine)
+    vals, vecs = np.linalg.eigh(H)
+    # sort by increasing energy
+    idx = vals.argsort()
+    vals = vals[idx]
+    vecs = vecs[:, idx]
+    return vals, vecs
+##
+def FGH(x, V, mass):
+    # Wrapper for FGHodd/FGHeven
+    N = len(x)
+    if N % 2:
+        print('choosing FGHodd() for N = {:d}'.format(N))
+        vals, vecs = FGHodd(x, V, mass)
+    else:
+        print('choosing FGHeven() for N = {:d}'.format(N))
+        vals, vecs = FGHeven(x, V, mass)
+    return vals, vecs
+##
 getframe_expr = 'sys._getframe({}).f_code.co_name'
 def print_err(errtype, details='', halt=True):
     # print a line about the error, with the name of the function
