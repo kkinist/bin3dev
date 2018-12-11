@@ -2858,16 +2858,130 @@ def FGHeven(x, V, mass):
     vecs = vecs[:, idx]
     return vals, vecs
 ##
-def FGH(x, V, mass):
+def FGH(x, V, mass, edges=True, silent=False):
     # Wrapper for FGHodd/FGHeven
+    # If edges == True, then return a third array that indicates the
+    #   edge (periodic) artifact for each eigenvector
     N = len(x)
     if N % 2:
-        print('choosing FGHodd() for N = {:d}'.format(N))
+        if not silent:
+            print('choosing FGHodd() for N = {:d}'.format(N))
         vals, vecs = FGHodd(x, V, mass)
     else:
-        print('choosing FGHeven() for N = {:d}'.format(N))
+        if not silent:
+            print('choosing FGHeven() for N = {:d}'.format(N))
         vals, vecs = FGHeven(x, V, mass)
-    return vals, vecs
+    if edges:
+        # compute an arbitrary measure of edge pathology
+        #  (|phi_left| + |phi_right|) / |phi|_max
+        fmax = np.abs(vecs).max(axis=0)
+        fend = np.abs(vecs[0,:]) + np.abs(vecs[-1,:])
+        ratio = fend / fmax
+        return vals, vecs, ratio
+    else:
+        return vals, vecs
+##
+def parabfit(X, Y):
+    # fit three points (exactly) to a parabola
+    # Return the values of the fitting constants a,b,c
+    #    y = a*x*x + b*x + c
+    if (len(X) != 3) or (len(Y) != 3):
+        print_err('', 'need exactly 3 points')
+    x = np.array(X)
+    y = np.array(Y)
+    # check for problems
+    if (x[0] == x[1]) or (x[0] == x[2]) or (x[1] == x[2]):
+        print_err('', 'vertical points')
+    m01 = (y[1] - y[0]) / (x[1] - x[0])
+    m12 = (y[2] - y[1]) / (x[2] - x[1])
+    a = (m12 - m01) / (x[2] - x[0])
+    b = m01 - a * (x[1] + x[0])
+    c = y[1] - a*x[1]*x[1] - b*x[1]
+    return a, b, c
+##
+def parabmin(X, Y, params=False):
+    # find the minimum by fitting the lowest point to a parabola
+    # If params==True, return the values of the fitting constants a,b,c
+    #    y = a*x*x + b*x + c
+    if len(X) != len(Y):
+        print_err('', 'X and Y are different lengths')
+    x = np.array(X)
+    y = np.array(Y)
+    idx = y.argmin()
+    if (idx == 0) or (idx == len(Y)-1):
+        # the lowest point is an endpoint; error condition
+        print_err('', 'lowest point is an endpoint')
+    if False:
+        (x0, x1, x2) = list(x[idx-1:idx+2])
+        (y0, y1, y2) = list(y[idx-1:idx+2])
+        # check for problems
+        if (x0 == x1) or (x0 == x2) or (x1 == x2):
+            print_err('', 'vertical points')
+        m01 = (y1 - y0) / (x1 - x0)
+        m12 = (y2 - y1) / (x2 - x1)
+        a = (m12 - m01) / (x2 - x0)
+        b = m01 - a * (x1 + x0)
+        c = y1 - a*x1*x1 - b*x1
+    a, b, c = parabfit(x[idx-1:idx+2], y[idx-1:idx+2])
+    try:
+        xmin = -b / (2*a)
+        ymin = c - b*b/(4*a)
+    except:
+        # probably linear
+        xmin = np.nan
+        ymin = np.nan
+    if params:
+        return xmin, ymin, a,b,c
+    else:
+        return xmin, ymin
+##
+def diatomic_spectr(R, V, mass, psitol=0.01, silent=False):
+    # given a potential, return some constants of diatomic spectroscopy
+    # input units are a.u., output units are cm**-1, angstrom
+    # return a dict of constants
+    # 'psitol' is tolerance for FGH periodicity artifacts
+    if not silent:
+        print('Wavefunction quality parameter = {:f}'.format(psitol))
+    constants = {}
+    # equilibrium distance
+    Re, Emin = parabmin(R, V)
+    constants['Re'] = Re * BOHR
+    # make energies relative to minimum
+    V = V - Emin
+    # compute low-lying levels E(v, J)
+    EvJ = np.zeros((3, 3))
+    for J in range(3):
+        centrifug = V + J*(J+1)/(2*mass*R*R)
+        cvals, cvecs, ratio = FGH(R, centrifug, mass, silent=silent)
+        if np.any(ratio[:3] > psitol):
+            # wavefunction is not good enough
+            print(ratio[:3])
+            print_err('', 'sloppy wfn for J = {:d}'.format(J))
+        EvJ[:,J] = cvals[:3]
+    # convert energy levels to cm**-1
+    EvJ *= AU_WAVENUMBER
+    # vibrational constants
+    constants['w0'] = EvJ[1,0] - EvJ[0,0]
+    constants['zpe'] = EvJ[0,0]
+    a, b, c = parabfit([0.5, 1.5, 2.5], EvJ[:,0])
+    constants['we'] = b
+    constants['wexe'] = -a
+    # rotational constants
+    B = []
+    D = []
+    jj = [J*(J+1) for J in range(3)]
+    for v in range(3):
+        a, b, c = parabfit(jj, EvJ[v,:])
+        B.append(b)
+        D.append(-a)
+    constants['B0'] = B[0]
+    constants['D0'] = D[0]
+    a, b, c = parabfit([0.5, 1.5, 2.5], B)
+    constants['alpha'] = -b
+    constants['Be'] = c
+    a, b, c = parabfit([0.5, 1.5, 2.5], D)
+    constants['De'] = c
+    return constants
 ##
 getframe_expr = 'sys._getframe({}).f_code.co_name'
 def print_err(errtype, details='', halt=True):
